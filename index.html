@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>工具箱</title>
+<style>
+  :root {
+    --bg: #f5f2ed;
+    --card: #ffffff;
+    --text: #2c2826;
+    --text-secondary: #7a736d;
+    --teal: #0d9488;
+    --teal-light: #ccfbf1;
+    --blue: #2563eb;
+    --blue-light: #dbeafe;
+    --violet: #7c3aed;
+    --violet-light: #ede9fe;
+    --gold: #d97706;
+    --gold-bg: #fef3c7;
+    --shadow-sm: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+    --shadow-md: 0 4px 12px rgba(0,0,0,0.07), 0 2px 4px rgba(0,0,0,0.04);
+    --shadow-lg: 0 10px 30px rgba(0,0,0,0.10), 0 4px 8px rgba(0,0,0,0.05);
+    --radius: 20px;
+    --radius-sm: 12px;
+    --font-display: "PingFang SC", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+    --font-body: "PingFang SC", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: var(--font-body);
+    background: var(--bg);
+    background-image:
+      radial-gradient(ellipse at 50% 0%, rgba(13,148,136,0.04) 0%, transparent 60%),
+      radial-gradient(ellipse at 85% 100%, rgba(124,58,237,0.03) 0%, transparent 50%);
+    min-height: 100dvh;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    padding: 16px;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+
+  .container {
+    width: 100%;
+    max-width: 420px;
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    animation: fadeIn 0.5s ease-out;
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .header {
+    background: var(--card);
+    border-radius: var(--radius);
+    padding: 20px;
+    box-shadow: var(--shadow-sm);
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .header h1 {
+    font-family: var(--font-display);
+    font-size: 1.3rem;
+    font-weight: 700;
+    color: var(--text);
+    letter-spacing: 0.02em;
+  }
+
+  .header .subtitle {
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+    font-weight: 500;
+  }
+
+  .tools-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  a.tool-card {
+    text-decoration: none;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 20px 18px;
+    background: var(--card);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-sm);
+    transition: all 0.25s ease;
+    -webkit-tap-highlight-color: transparent;
+  }
+  a.tool-card:active {
+    transform: scale(0.98);
+    box-shadow: var(--shadow-md);
+  }
+
+  .tool-icon {
+    width: 52px;
+    height: 52px;
+    border-radius: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 1.6rem;
+    flex-shrink: 0;
+    font-weight: 900;
+  }
+
+  .icon-lung { background: var(--teal-light); color: var(--teal); }
+  .icon-tax { background: var(--blue-light); color: var(--blue); }
+  .icon-rmb { background: var(--gold-bg); color: var(--gold); }
+
+  .tool-info {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .tool-info .tool-name {
+    font-family: var(--font-display);
+    font-size: 1rem;
+    font-weight: 700;
+    color: var(--text);
+    letter-spacing: 0.02em;
+  }
+
+  .tool-info .tool-desc {
+    font-size: 0.78rem;
+    color: var(--text-secondary);
+    font-weight: 500;
+    line-height: 1.4;
+  }
+
+  .tool-arrow {
+    margin-left: auto;
+    color: #ccc;
+    font-size: 1.1rem;
+  }
+
+  .footer {
+    text-align: center;
+    padding: 8px 0 20px;
+    font-size: 0.7rem;
+    color: #c4bfb8;
+  }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <div class="header">
+    <h1>工具箱</h1>
+    <span class="subtitle">实用小工具集合</span>
+  </div>
+
+  <div class="tools-grid">
+    <a class="tool-card" href="./lung-marker.html">
+      <div class="tool-icon icon-lung">&#x1F6AC;</div>
+      <div class="tool-info">
+        <span class="tool-name">支气管分段标记</span>
+        <span class="tool-desc">右下叶基底段顺序标记，支持后悔模式</span>
+      </div>
+      <span class="tool-arrow">&#x203A;</span>
+    </a>
+
+    <a class="tool-card" href="./tax-calc.html">
+      <div class="tool-icon icon-tax">&#x1F4B0;</div>
+      <div class="tool-info">
+        <span class="tool-name">税点计算器</span>
+        <span class="tool-desc">含税金额 ÷ 税率，一键算税前与税额</span>
+      </div>
+      <span class="tool-arrow">&#x203A;</span>
+    </a>
+
+    <a class="tool-card" href="./rmb-upper.html">
+      <div class="tool-icon icon-rmb">&#x00A5;</div>
+      <div class="tool-info">
+        <span class="tool-name">人民币大写转换</span>
+        <span class="tool-desc">数字金额转大写，符合央行规范</span>
+      </div>
+      <span class="tool-arrow">&#x203A;</span>
+    </a>
+  </div>
+
+  <div class="footer">更多工具即将上线</div>
+</div>
+
+</body>
+</html>
