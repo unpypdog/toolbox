@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no, viewport-fit=cover">
+<title>税点计算器</title>
+<style>
+  :root {
+    --bg: #f5f2ed;
+    --card: #ffffff;
+    --text: #2c2826;
+    --text-secondary: #7a736d;
+    --teal: #0d9488;
+    --teal-light: #ccfbf1;
+    --gold: #d97706;
+    --gold-bg: #fef3c7;
+    --danger: #dc2626;
+    --danger-light: #fee2e2;
+    --shadow-sm: 0 1px 3px rgba(0,0,0,0.06), 0 1px 2px rgba(0,0,0,0.04);
+    --shadow-md: 0 4px 12px rgba(0,0,0,0.07), 0 2px 4px rgba(0,0,0,0.04);
+    --radius: 20px;
+    --radius-sm: 12px;
+    --font-display: "PingFang SC", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+    --font-body: "PingFang SC", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: var(--font-body);
+    background: var(--bg);
+    background-image:
+      radial-gradient(ellipse at 50% 0%, rgba(13,148,136,0.04) 0%, transparent 60%),
+      radial-gradient(ellipse at 85% 100%, rgba(124,58,237,0.03) 0%, transparent 50%);
+    min-height: 100dvh;
+    display: flex;
+    justify-content: center;
+    align-items: flex-start;
+    padding: 16px;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  .container {
+    width: 100%;
+    max-width: 420px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    animation: fadeIn 0.4s ease-out;
+  }
+
+  @keyframes fadeIn {
+    from { opacity: 0; transform: translateY(12px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  a.back-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 0.85rem;
+    font-weight: 600;
+    width: fit-content;
+    transition: color 0.2s;
+  }
+  a.back-link:active { color: var(--teal); }
+
+  .card {
+    background: var(--card);
+    border-radius: var(--radius);
+    padding: 20px;
+    box-shadow: var(--shadow-sm);
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .card h2 {
+    font-family: var(--font-display);
+    font-size: 1.15rem;
+    font-weight: 700;
+    color: var(--text);
+  }
+
+  .input-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .input-group label {
+    font-size: 0.8rem;
+    font-weight: 600;
+    color: var(--text-secondary);
+  }
+
+  .input-group input, .input-group select {
+    padding: 12px 14px;
+    border-radius: var(--radius-sm);
+    border: 2px solid #e5e0da;
+    font-size: 1rem;
+    font-family: var(--font-body);
+    background: #faf9f7;
+    outline: none;
+    transition: border-color 0.2s;
+    width: 100%;
+  }
+  .input-group input:focus, .input-group select:focus {
+    border-color: var(--teal);
+    background: #fff;
+  }
+
+  #customRateInput {
+    display: none;
+    margin-top: 8px;
+  }
+  #customRateInput.show {
+    display: block;
+  }
+
+  .result-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 16px;
+    background: #f8f6f3;
+    border-radius: var(--radius-sm);
+    gap: 10px;
+  }
+
+  .result-label {
+    font-size: 0.8rem;
+    color: var(--text-secondary);
+    font-weight: 500;
+    white-space: nowrap;
+  }
+
+  .result-value {
+    font-size: 1.3rem;
+    font-weight: 800;
+    color: var(--text);
+    flex: 1;
+    text-align: right;
+    letter-spacing: 0.02em;
+  }
+
+  .copy-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 6px 12px;
+    border-radius: 20px;
+    border: 1.5px solid #e5e0da;
+    background: #fff;
+    color: var(--text-secondary);
+    font-size: 0.75rem;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: all 0.2s;
+    flex-shrink: 0;
+  }
+  .copy-btn:active { transform: scale(0.95); }
+  .copy-btn.copied {
+    background: var(--teal-light);
+    border-color: var(--teal);
+    color: var(--teal);
+  }
+</style>
+</head>
+<body>
+
+<div class="container">
+  <a class="back-link" href="./index.html">&#x2190; 返回工具箱</a>
+
+  <div class="card">
+    <h2>税点计算器</h2>
+
+    <div class="input-group">
+      <label for="amountInput">合同金额（含税）</label>
+      <input type="number" id="amountInput" placeholder="输入含税总金额" inputmode="decimal">
+    </div>
+
+    <div class="input-group">
+      <label for="rateSelect">税率</label>
+      <select id="rateSelect">
+        <option value="0.13">13%</option>
+        <option value="0.09">9%</option>
+        <option value="0.06">6%</option>
+        <option value="0.05">5%</option>
+        <option value="0.01">1%</option>
+        <option value="custom">自定义</option>
+      </select>
+      <input type="number" id="customRateInput" placeholder="输入自定义税率 (%)" inputmode="decimal" step="0.01">
+    </div>
+
+    <div class="result-row">
+      <span class="result-label">税前金额</span>
+      <span class="result-value" id="preTaxAmount">—</span>
+      <button class="copy-btn" data-target="preTaxAmount">复制</button>
+    </div>
+
+    <div class="result-row">
+      <span class="result-label">税点金额</span>
+      <span class="result-value" id="taxAmount">—</span>
+      <button class="copy-btn" data-target="taxAmount">复制</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function() {
+  const amountInput = document.getElementById('amountInput');
+  const rateSelect = document.getElementById('rateSelect');
+  const customRateInput = document.getElementById('customRateInput');
+  const preTaxEl = document.getElementById('preTaxAmount');
+  const taxEl = document.getElementById('taxAmount');
+
+  function formatMoney(n) {
+    return n.toFixed(2);
+  }
+
+  function calc() {
+    const amount = parseFloat(amountInput.value);
+    if (isNaN(amount) || amount <= 0) {
+      preTaxEl.textContent = '—';
+      taxEl.textContent = '—';
+      return;
+    }
+
+    let rate;
+    if (rateSelect.value === 'custom') {
+      const customVal = parseFloat(customRateInput.value);
+      if (isNaN(customVal) || customVal < 0) {
+        preTaxEl.textContent = '—';
+        taxEl.textContent = '—';
+        return;
+      }
+      rate = customVal / 100;
+    } else {
+      rate = parseFloat(rateSelect.value);
+    }
+
+    if (isNaN(rate)) {
+      preTaxEl.textContent = '—';
+      taxEl.textContent = '—';
+      return;
+    }
+
+    const preTax = amount / (1 + rate);
+    const tax = amount - preTax;
+
+    preTaxEl.textContent = formatMoney(preTax);
+    taxEl.textContent = formatMoney(tax);
+  }
+
+  rateSelect.addEventListener('change', function() {
+    if (this.value === 'custom') {
+      customRateInput.classList.add('show');
+    } else {
+      customRateInput.classList.remove('show');
+    }
+    calc();
+  });
+
+  amountInput.addEventListener('input', calc);
+  customRateInput.addEventListener('input', calc);
+
+  // Copy buttons
+  document.querySelectorAll('.copy-btn').forEach(function(btn) {
+    btn.addEventListener('click', function() {
+      var targetId = this.dataset.target;
+      var el = document.getElementById(targetId);
+      var text = el.textContent;
+      if (text === '—') return;
+
+      navigator.clipboard.writeText(text).then(function() {
+        btn.textContent = '已复制';
+        btn.classList.add('copied');
+        setTimeout(function() {
+          btn.textContent = '复制';
+          btn.classList.remove('copied');
+        }, 1500);
+      }).catch(function() {
+        var ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        btn.textContent = '已复制';
+        btn.classList.add('copied');
+        setTimeout(function() {
+          btn.textContent = '复制';
+          btn.classList.remove('copied');
+        }, 1500);
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>
