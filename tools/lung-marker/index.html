@@ -63,6 +63,19 @@
     to { opacity: 1; transform: translateY(0); }
   }
 
+  a.back-link {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--text-secondary);
+    text-decoration: none;
+    font-size: 0.85rem;
+    font-weight: 600;
+    width: fit-content;
+    transition: color 0.2s;
+  }
+  a.back-link:active { color: var(--teal); }
+
   /* ===== HEADER ===== */
   .header {
     background: var(--card);
@@ -439,6 +452,8 @@
 <body>
 
 <div class="container">
+  <a class="back-link" href="../../index.html">&#x2190; 返回工具箱</a>
+
   <!-- Header -->
   <header class="header">
     <div class="title-group">
