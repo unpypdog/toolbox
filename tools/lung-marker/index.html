@@ -54,7 +54,7 @@
     max-width: 420px;
     display: flex;
     flex-direction: column;
-    gap: 18px;
+    gap: 10px;
     animation: fadeIn 0.5s ease-out;
   }
 
@@ -80,7 +80,7 @@
   .header {
     background: var(--card);
     border-radius: var(--radius);
-    padding: 16px 20px;
+    padding: 14px 18px;
     box-shadow: var(--shadow-sm);
     display: flex;
     align-items: center;
@@ -111,59 +111,11 @@
     text-transform: uppercase;
   }
 
-  /* ===== REGRET TOGGLE ===== */
-  .regret-toggle-wrap {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-shrink: 0;
-  }
-
-  .regret-label {
-    font-size: 0.8rem;
-    font-weight: 600;
-    color: var(--text-secondary);
-    white-space: nowrap;
-    transition: color 0.25s ease;
-  }
-  .regret-label.active {
-    color: #b45309;
-  }
-
-  .toggle-track {
-    width: 52px;
-    height: 30px;
-    border-radius: 15px;
-    background: #e5e0da;
-    cursor: pointer;
-    position: relative;
-    transition: background 0.3s ease;
-    flex-shrink: 0;
-  }
-  .toggle-track.active {
-    background: #f59e0b;
-  }
-
-  .toggle-thumb {
-    width: 24px;
-    height: 24px;
-    border-radius: 12px;
-    background: #fff;
-    box-shadow: 0 1px 4px rgba(0,0,0,0.15);
-    position: absolute;
-    top: 3px;
-    left: 3px;
-    transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
-  }
-  .toggle-track.active .toggle-thumb {
-    transform: translateX(22px);
-  }
-
   /* ===== ORDER TRACK ===== */
   .order-track {
     background: var(--card);
     border-radius: var(--radius);
-    padding: 14px 16px;
+    padding: 10px 14px;
     box-shadow: var(--shadow-sm);
     display: flex;
     align-items: center;
@@ -198,10 +150,10 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 3px;
+    gap: 2px;
     transition: all 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
     position: relative;
-    min-height: 56px;
+    min-height: 50px;
   }
 
   .order-slot.filled {
@@ -250,7 +202,7 @@
   .segment-grid {
     display: grid;
     grid-template-columns: 1fr 1fr;
-    gap: 12px;
+    gap: 10px;
   }
 
   .seg-btn {
@@ -259,9 +211,9 @@
     flex-direction: column;
     align-items: center;
     justify-content: center;
-    gap: 8px;
-    padding: 28px 16px 24px;
-    min-height: 130px;
+    gap: 6px;
+    padding: 22px 14px 18px;
+    min-height: 100px;
     border-radius: var(--radius);
     border: 2.5px solid transparent;
     cursor: pointer;
@@ -381,8 +333,21 @@
   /* ===== RESET BUTTON ===== */
   .reset-area {
     display: flex;
-    justify-content: center;
-    padding-top: 2px;
+    flex-direction: column;
+    align-items: center;
+    gap: 6px;
+    padding-top: 0;
+  }
+
+  .regret-hint-inline {
+    font-size: 0.72rem;
+    font-weight: 600;
+    color: #92400e;
+    letter-spacing: 0.02em;
+    display: none;
+  }
+  .regret-hint-inline.show {
+    display: block;
   }
 
   .reset-btn {
@@ -420,33 +385,6 @@
     transform: rotate(-90deg);
   }
 
-  /* ===== REGRET MODE BANNER ===== */
-  .regret-banner {
-    background: #fffbeb;
-    border: 1.5px solid #fde68a;
-    border-radius: var(--radius-sm);
-    padding: 10px 14px;
-    font-size: 0.78rem;
-    font-weight: 600;
-    color: #92400e;
-    text-align: center;
-    letter-spacing: 0.02em;
-    display: none;
-    animation: fadeIn 0.3s ease;
-  }
-  .regret-banner.show {
-    display: block;
-  }
-
-  .regret-banner .arrow-hint {
-    display: inline-block;
-    animation: bounceDown 0.8s ease-in-out infinite;
-  }
-
-  @keyframes bounceDown {
-    0%, 100% { transform: translateY(0); }
-    50% { transform: translateY(3px); }
-  }
 </style>
 </head>
 <body>
@@ -460,18 +398,7 @@
       <h1>右下叶基底段</h1>
       <span class="subtitle">支气管分段标记</span>
     </div>
-    <div class="regret-toggle-wrap">
-      <span class="regret-label" id="regretLabel">后悔模式</span>
-      <div class="toggle-track" id="regretToggle" role="switch" aria-checked="true">
-        <div class="toggle-thumb"></div>
-      </div>
-    </div>
   </header>
-
-  <!-- Regret banner -->
-  <div class="regret-banner" id="regretBanner">
-    <span class="arrow-hint">&#x25BC;</span> 点击最后一个标记可撤销，或点击未标记按钮重新绑定 <span class="arrow-hint">&#x25BC;</span>
-  </div>
 
   <!-- Order Track -->
   <div class="order-track">
@@ -522,6 +449,7 @@
 
   <!-- Reset -->
   <div class="reset-area">
+    <span class="regret-hint-inline" id="regretHint">点击最后标记可撤销，未标记按钮可重新绑定</span>
     <button class="reset-btn" id="resetBtn">
       <svg class="reset-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
         <polyline points="1 4 1 10 7 10"/>
@@ -542,15 +470,12 @@
   let selections = [null, null, null, null];  // index -> order (1-4) or null
   let orderMap = [null, null, null, null, null]; // order (1-4) -> button index
   let nextOrder = 1;
-  let regretMode = true;
 
   // DOM refs
   const buttons = document.querySelectorAll('.seg-btn');
   const badges = document.querySelectorAll('.order-badge');
   const orderSlots = document.querySelectorAll('.order-slot');
-  const regretToggle = document.getElementById('regretToggle');
-  const regretLabel = document.getElementById('regretLabel');
-  const regretBanner = document.getElementById('regretBanner');
+  const regretHint = document.getElementById('regretHint');
   const resetBtn = document.getElementById('resetBtn');
 
   function currentMaxOrder() {
@@ -570,9 +495,9 @@
         badge.classList.remove('show');
       }
 
-      // Undo eligibility glow
+      // Undo eligibility glow (always regret mode)
       btn.classList.remove('can-undo');
-      if (regretMode && selections[i] !== null && selections[i] === currentMaxOrder()) {
+      if (selections[i] !== null && selections[i] === currentMaxOrder()) {
         btn.classList.add('can-undo');
       }
     });
@@ -594,57 +519,29 @@
       }
     });
 
-    // Regret mode UI
-    if (regretMode) {
-      regretToggle.classList.add('active');
-      regretToggle.setAttribute('aria-checked', 'true');
-      regretLabel.classList.add('active');
-      if (currentMaxOrder() >= 1) {
-        regretBanner.classList.add('show');
-      } else {
-        regretBanner.classList.remove('show');
-      }
+    // Regret hint visibility
+    if (currentMaxOrder() >= 1) {
+      regretHint.classList.add('show');
     } else {
-      regretToggle.classList.remove('active');
-      regretToggle.setAttribute('aria-checked', 'false');
-      regretLabel.classList.remove('active');
-      regretBanner.classList.remove('show');
+      regretHint.classList.remove('show');
     }
   }
 
   function handleButtonClick(index) {
-    if (regretMode) {
-      // --- REGRET MODE ---
-      if (selections[index] !== null) {
-        // Button IS selected: only allow undoing the LAST one (LIFO)
-        if (selections[index] !== currentMaxOrder()) {
-          shakeButton(index);
-          flashEligibleButton();
-          return;
-        }
-        // OK to regret this one
-        orderMap[selections[index]] = null;
-        selections[index] = null;
-        nextOrder--;
-        updateUI();
-        if (currentMaxOrder() < 1) {
-          regretBanner.classList.remove('show');
-        }
-      } else {
-        // Button is UNSELECTED: allow re-selecting to fill the open position
-        if (nextOrder > 4) {
-          return;
-        }
-        selections[index] = nextOrder;
-        orderMap[nextOrder] = index;
-        nextOrder++;
-        updateUI();
-      }
-    } else {
-      // --- NORMAL MODE ---
-      if (selections[index] !== null) {
+    if (selections[index] !== null) {
+      // Button IS selected: only allow undoing the LAST one (LIFO)
+      if (selections[index] !== currentMaxOrder()) {
+        shakeButton(index);
+        flashEligibleButton();
         return;
       }
+      // OK to regret this one
+      orderMap[selections[index]] = null;
+      selections[index] = null;
+      nextOrder--;
+      updateUI();
+    } else {
+      // Button is UNSELECTED: assign next available order
       if (nextOrder > 4) {
         return;
       }
@@ -682,11 +579,6 @@
     updateUI();
   }
 
-  function toggleRegretMode() {
-    regretMode = !regretMode;
-    updateUI();
-  }
-
   // Event listeners
   buttons.forEach((btn, i) => {
     btn.addEventListener('click', (e) => {
@@ -699,8 +591,6 @@
       handleButtonClick(i);
     });
   });
-
-  regretToggle.addEventListener('click', toggleRegretMode);
 
   resetBtn.addEventListener('click', resetAll);
   resetBtn.addEventListener('touchstart', (e) => {

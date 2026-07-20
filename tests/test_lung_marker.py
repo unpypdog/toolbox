@@ -96,20 +96,14 @@ def run():
         if not any("after reset" in e for e in errors):
             print("[OK] Test 3: Reset clears all selections")
 
-        # === Test 4: Regret mode enforces LIFO undo ===
+        # === Test 4: Regret mode enforces LIFO undo (always on) ===
         # Re-select buttons: 前(1), 后(2), 内(3), 外(4)
         for idx in [0, 1, 2, 3]:
             btns.nth(idx).click()
             page.wait_for_timeout(150)
 
-        # Enable regret mode
-        page.locator("#regretToggle").click()
         page.wait_for_timeout(300)
         page.screenshot(path=str(SCREENSHOT_DIR / "test_04a_regret_mode.png"), full_page=True)
-
-        # Verify regret mode is active
-        if not page.locator("#regretToggle").evaluate("el => el.classList.contains('active')"):
-            errors.append("Regret toggle should be active")
 
         # Verify only button 外 (index 3, order 4) has can-undo class
         for i in range(4):
