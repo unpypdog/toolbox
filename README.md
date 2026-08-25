@@ -38,3 +38,4 @@ uv run python tests/test_tax_calc.py
 | 支气管分段标记 | `tools/lung-marker/` | 右下叶基底段顺序标记，支持后悔模式 |
 | 税点计算器 | `tools/tax-calc/` | 含税金额 ÷ 税率，一键算税前与税额 |
 | 人民币大写转换 | `tools/rmb-upper/` | 数字金额转大写，符合央行规范 |
+| 公用信息分享 | `tools/share-info/` | 网盘链接与密码，一键复制分享 |
