@@ -56,10 +56,10 @@
 
 ## 2026-08-26 功能扩展
 
-- 数据字段扩展为 `{ title, url, password?, description?, category, accounts? }`
-- `category` 支持 `auto`、`cloud-drive`、`website`、`credential-site`
-- 自动分类优先级：显式分类 → 存在账号组 → 存在提取码 → 已知网盘域名或分享路径 → 普通网站
+- 数据字段扩展为 `{ title, url?, password?, description?, category, accounts? }`
+- `category` 支持 `auto`、`cloud-drive`、`website`、`credential-site`、`password-note`
+- 自动分类优先级：显式分类 → 存在账号组 → 无网址的独立密码 → 存在提取码 → 已知网盘域名或分享路径 → 普通网站
 - `accounts` 用于业务系统的多组用途、账号和密码
-- 网盘、普通网站与业务系统采用不同卡片内容和复制操作
+- 网盘、普通网站、业务系统与常用密码采用不同卡片内容和复制操作
 - 分享优先调用 Web Share API，不可用时复制格式化文本
 - 公共数据仍内嵌在 HTML 中，暂不启用 localStorage
