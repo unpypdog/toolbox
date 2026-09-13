@@ -136,6 +136,7 @@ connect-src https: http://localhost:* http://127.0.0.1:*    放宽：地址运�
 | `tools/training-cert-batch-fill/app.js` | 新建（脱敏自桌面副本） |
 | `tools/training-cert-batch-fill/styles.css` | 新建（脱敏 + 新增样式） |
 | `tools/training-cert-batch-fill/xlsx.full.min.js` | 新建（下载官方构建） |
+| `.gitattributes` | 新建（`*.min.js -text -diff`，防止 CRLF 改写破坏内置库的校验和） |
 | `index.html` | 修改（添加导航卡片与图标样式） |
 | `README.md` | 修改（工具表格加一行） |
 | `tests/test_training_cert_batch_fill.py` | 新建 |

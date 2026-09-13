@@ -27,7 +27,7 @@ def run():
         else:
             print(f"[OK] Page title: {title}")
 
-        # Test 2: Three tool cards exist
+        # Test 2: Four tool cards exist
         cards = page.locator(".tool-card")
         card_count = cards.count()
         if card_count != 4:
