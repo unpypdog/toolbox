@@ -72,6 +72,7 @@ git commit -m "chore: 内置 SheetJS 0.20.3 到 training-cert-batch-fill"
 """Test the training certificate batch fill page."""
 import base64
 import hashlib
+import re
 from pathlib import Path
 from playwright.sync_api import sync_playwright
 
@@ -82,6 +83,12 @@ FILE_URL = f"file:///{TOOL_DIR / 'index.html'}"
 SHEETJS_SHA256 = "cc015130aa8521e7f088f88898eba949ccdcbfb38df0bd129b44b7273c3a6f41"
 
 API_BASE = "https://api.example.test:8443"
+
+# 工具源码允许出现的外部主机：SVG 命名空间，以及 CSP 里的回环地址。
+# 任何其他主机都意味着业务地址被写死进了公开仓库。
+ALLOWED_HOSTS = {"www.w3.org", "localhost", "127.0.0.1"}
+HOST_RE = re.compile(r"https?://([A-Za-z0-9._-]+)")
+
 EXISTING_PHONE = "13700137000"
 PASSWORD = "secret-value"
 
@@ -205,17 +212,22 @@ def run():
             else:
                 print(f"[OK] Back link: {href}")
 
-        # Test 3: 源码不含业务地址与账号名
+        # Test 3: 工具源码不含任何外部主机
+        # 正向断言而非黑名单：写死业务地址、又或者将来换了个新地址，
+        # 都会在这里暴露，不必事先知道具体主机名。
         leaks = []
         for name in ("index.html", "app.js", "styles.css"):
-            source = (TOOL_DIR / name).read_text(encoding="utf-8").lower()
-            for needle in ("业务系统", "<业务主机>", "业务账号", "cdn.sheetjs.com"):
-                if needle in source:
-                    leaks.append(f"{name} contains '{needle}'")
+            source_path = TOOL_DIR / name
+            if not source_path.is_file():
+                errors.append(f"{name} missing; host scan skipped")
+                continue
+            for host in HOST_RE.findall(source_path.read_text(encoding="utf-8")):
+                if host not in ALLOWED_HOSTS:
+                    leaks.append(f"{name} references external host '{host}'")
         if leaks:
             errors.extend(leaks)
         else:
-            print("[OK] No business host or account name in source")
+            print("[OK] No external host references in the tool sources")
 
         # Test 4: SheetJS 已内置且与锁定的官方构建逐字节一致
         xlsx_path = TOOL_DIR / "xlsx.full.min.js"
@@ -528,7 +540,7 @@ data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'
 
 ```html
       <div class="brand-copy">
-        <p class="eyebrow">业务系统 · DATA OPERATIONS</p>
+        <p class="eyebrow"><原业务系统标识> · DATA OPERATIONS</p>
         <h1>用户导入台</h1>
       </div>
 ```
@@ -568,7 +580,7 @@ data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'
 
 - [ ] **Step 9: 去掉账号预填**
 
-把账号 input 的 `value="业务账号"` 删掉并加 placeholder：
+把账号 input 预填的 `value="<原业务账号>"` 删掉并加 placeholder：
 
 ```html
               <input id="usernameInput" name="username" autocomplete="username" placeholder="登录账号" required />
@@ -589,7 +601,7 @@ data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'
 ```html
     <footer>
       <span>STATIC CLIENT / GITHUB PAGES READY</span>
-      <span>API · <业务主机>:<端口></span>
+      <span>API · <原业务地址></span>
     </footer>
 ```
 
@@ -605,10 +617,10 @@ data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'
 - [ ] **Step 12: 确认没有遗漏的敏感字符串**
 
 ```powershell
-Select-String -Path "D:\project\toolbox\tools\training-cert-batch-fill\index.html" -Pattern "业务系统|业务账号|cdn\.sheetjs\.com" -CaseSensitive:$false
+Select-String -Path "D:\project\toolbox\tools\training-cert-batch-fill\index.html" -Pattern "https?://" -CaseSensitive:$false
 ```
 
-Expected: 无任何输出。
+Expected: 只出现三处，且都不是业务主机——SVG 命名空间 `http://www.w3.org`，以及 CSP 里的 `http://localhost:*` 与 `http://127.0.0.1:*`。若出现第四处，说明有外部资源或业务地址残留。
 
 - [ ] **Step 13: Commit**
 
@@ -640,7 +652,7 @@ Copy-Item $src $dst -Force
 把：
 
 ```js
-const API_BASE = "https://<业务主机>:<端口>";
+const API_BASE = "https://<原业务主机>:<端口>";
 ```
 
 改为：
@@ -730,6 +742,11 @@ function normalizeApiBase(raw) {
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     throw new Error("服务地址必须以 http:// 或 https:// 开头。");
   }
+  // 页面的 CSP 只对回环地址放开明文 http，其他 http 会被浏览器直接拦掉。
+  // 在这里提前拒绝并说明原因，免得用户只看到一句无从下手的 Failed to fetch。
+  if (parsed.protocol === "http:" && !["localhost", "127.0.0.1"].includes(parsed.hostname)) {
+    throw new Error("明文 http 仅允许 localhost 或 127.0.0.1，其他地址请使用 https://。");
+  }
   return value;
 }
 ```
@@ -775,13 +792,29 @@ async function connect({ quiet = false } = {}) {
     const response = await fetch(`${state.apiBase}${path}`, {
 ```
 
+- [ ] **Step 8b: 改掉两个导出文件名**
+
+`app.js` 里有两处导出文件名带着**业务系统标识前缀**，必须一并改掉。Test 3 的主机扫描查不出它们（文件名里没有主机名），但工具会把业务标识写进用户下载的文件名，这两处在原计划里被漏掉了。
+
+这两处分别在 `downloadTemplate()` 与 `exportResults()` 中（搜 `downloadText(` 即可定位，文件里只有这两个调用点）。把两处的文件名前缀统一改为 `training-cert-batch-fill_`，即：
+
+```js
+    "training-cert-batch-fill_template.csv",
+```
+
+```js
+    `training-cert-batch-fill_result_${stamp}.csv`,
+```
+
+（后缀 `_template.csv` / `_result_<时间戳>.csv` 保持不变。）
+
 - [ ] **Step 9: 确认没有遗漏的常量引用与敏感字符串**
 
 ```powershell
-Select-String -Path "D:\project\toolbox\tools\training-cert-batch-fill\app.js" -Pattern "API_BASE[^_]|业务系统|业务账号" -CaseSensitive:$false
+Select-String -Path "D:\project\toolbox\tools\training-cert-batch-fill\app.js" -Pattern "https?://|API_BASE[^_]|downloadText\(" -CaseSensitive:$false
 ```
 
-Expected: 无输出。（`API_BASE_STORAGE_KEY` 带下划线，会被 `API_BASE[^_]` 排除；若出现 `API_BASE` 的其他用法则是漏改。）
+Expected: 无输出。（`API_BASE_STORAGE_KEY` 带下划线，会被 `API_BASE[^_]` 排除；若命中 `API_BASE` 的其他用法即为漏改。`downloadText(` 也应无命中——Step 7 必须把所有调用点都写成 `downloadText(`——若命中说明有调用点还带着旧参数写法，需对照 Step 7。）
 
 - [ ] **Step 10: 语法检查**
 
@@ -839,10 +872,38 @@ Copy-Item $src $dst -Force
 
 颜色用浅色是因为返回链接位于深色 `.masthead` 内；其余样式（表格 `min-width: 840px`、`[hidden]` 全局规则、移动端媒体查询）沿用源文件，**不要改动**——这两条是上一轮修复过的移动端与隐藏态问题。
 
+- [ ] **Step 2b: 修 h1 在 390px 下的孤字折行**
+
+标题从 4 个字（用户导入台）变成 10 个字（操作培训证书批量填充）后，在 390px 视口下会差约 1.1px 折成「9 字 + 孤零零一个『充』」。这不是溢出，`overflow` 断言看不见它，只有截图能发现。
+
+现有 `h1` 规则是 `font-size: clamp(1.65rem, 3vw, 2.4rem)`，390px 时落到下限 1.65rem（26.4px），加上 `letter-spacing: 0.08em` 共约 285px，而可用宽度是 284px。
+
+在文件末尾的媒体查询区域追加：
+
+```css
+@media (max-width: 430px) {
+  .brand-copy h1 {
+    font-size: clamp(1.35rem, 6.2vw, 1.65rem);
+    text-wrap: balance;
+  }
+}
+```
+
+390px 时字号约 24.2px，标题约 261px，单行放得下；320px 时仍会折行，`text-wrap: balance` 让它折成 5+5 而不是留一个孤字。
+
+- [ ] **Step 2c: 清掉只为 `F+` 字标存在的死样式**
+
+字标已从 `F+` 变成单个 `证`，以下两条规则失去意义：
+
+- `.brand-mark span { color: var(--orange); font-size: 0.75em; }` —— 整条删除（页面里已无 `.brand-mark span`）
+- `.brand-mark` 里的 `letter-spacing: -0.1em;` —— 删除。它原本是把 `+` 往 `F` 上收，对单个 CJK 字形只会让字略偏左
+
+`.brand-mark` 的 `font-size: 2rem` 保留即可（实测 `证` 在 64px 框内宽约 29px，居中正常）。
+
 - [ ] **Step 3: 确认无敏感字符串**
 
 ```powershell
-Select-String -Path "D:\project\toolbox\tools\training-cert-batch-fill\styles.css" -Pattern "业务系统|业务账号" -CaseSensitive:$false
+Select-String -Path "D:\project\toolbox\tools\training-cert-batch-fill\styles.css" -Pattern "https?://" -CaseSensitive:$false
 ```
 
 Expected: 无输出。
@@ -874,7 +935,7 @@ Expected:
 [OK] All 14 required elements present
 [OK] Page title: 操作培训证书批量填充
 [OK] Back link: ../../index.html
-[OK] No business host or account name in source
+[OK] No external host references in the tool sources
 [OK] SheetJS vendored and checksum matches the pinned build
 [OK] CSP narrowed for scripts, relaxed for connect only
 [OK] Username input not prefilled
@@ -972,6 +1033,8 @@ Expected: 打印两行 `saved D:\project\toolbox\tests\screenshots\training-cert
 - 统计卡片显示 3 条记录、1 合格、2 问题
 - 手机版表格在容器内横向滚动，中文未被压成单字竖排
 - 页面无横向溢出
+- **390px 下 h1「操作培训证书批量填充」是完整一行，末字没有孤行**（这条 `overflow` 断言查不出来，只能看）
+- **手机版顶栏高度不夸张**（应当明显矮于半个屏幕）
 
 - [ ] **Step 5: 确认三个文件都已提交且工作区干净**
 
@@ -986,6 +1049,19 @@ git log --oneline -4
 Expected: `git status --short` 无输出（截图目录被 `*.png` 忽略）；`git log` 顶部三条分别是 index.html、app.js、styles.css 的提交。
 
 若有未提交内容，说明前面某个任务漏提交，先补提交再继续。
+
+- [ ] **Step 6: 全仓库脱敏闸门**
+
+工具源码干净不等于仓库干净——`docs/` 与 `tests/` 同样会被推送。在**任何推送之前**跑：
+
+```bash
+cd /d/project/toolbox
+git grep -n -i -E "业务主机关键词|业务账号关键词|业务端口" origin/master..HEAD
+```
+
+Expected: 无输出。命中就说明脱敏只做了一半，必须处理后再推送。
+
+注意：这类关键词**不要**写进任何会被提交的文件（包括本计划、设计文档和测试），否则闸门自身就成了泄漏点。需要时用自己的记忆或本机笔记核对，测试里改用正向断言（见 Task 2 的 Test 3）。
 
 ---
 
@@ -1120,7 +1196,8 @@ git commit -m "feat: 首页新增操作培训证书批量填充卡片
 ## 完成标准
 
 - `tools/training-cert-batch-fill/` 含 4 个文件：`index.html`、`app.js`、`styles.css`、`xlsx.full.min.js`
-- 工具目录内源码不含 `业务系统`、`<业务主机>`、`业务账号`、`cdn.sheetjs.com`（大小写不敏感）
+- 工具目录内源码不含任何外部主机（`www.w3.org` 与回环地址除外），由 Test 3 的正向断言保证
+- 仓库内所有被跟踪文件（含 docs 与 tests）均不含业务主机、业务账号名与业务端口
 - 工具页有指向 `../../index.html` 的 `a.back-link`，CSP 中 `script-src 'self'` 且 `connect-src` 含 `https:`
 - 首页有 4 张卡片，新卡片链接正确
 - 5 个测试文件全部 `ALL TESTS PASSED`

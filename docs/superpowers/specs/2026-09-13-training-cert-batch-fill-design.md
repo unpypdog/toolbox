@@ -51,8 +51,11 @@ toolbox/
 | `index.html` title、meta description、h1、eyebrow | 含业务系统品牌名与「用户导入台」 | 「操作培训证书批量填充」及中性文案 |
 | `index.html` brand-mark `F+` | 业务系统品牌字标 | 中性图标（证件/表格意象） |
 | `index.html` favicon（内联 SVG） | 品牌字母 "F" | 中性图形 |
-| `index.html` footer `API · <业务主机>:<端口>` | 硬编码业务地址 | 删除，改为「服务地址由使用者填写」 |
-| `index.html` 账号输入框 `value="业务账号"` | 预填真实账号名 | 去掉 `value`，仅保留 `placeholder` |
+| `index.html` footer 里的硬编码业务地址 | 明文业务主机与端口 | 删除，改为「服务地址由使用者填写」 |
+| `index.html` 账号输入框预填 | 预填真实业务账号名 | 去掉 `value`，仅保留 `placeholder` |
+| `app.js` 两处 `downloadText` 文件名 | 含业务系统标识的导出文件名 | 改为按工具名命名（`training-cert-batch-fill_*`） |
+
+配套约束：**仓库内所有被跟踪文件（含 `docs/` 与 `tests/`）都不得出现业务主机、业务账号名或业务端口。** 文档里引用这些值时一律用占位符（如 `<原业务主机>:<端口>`）。测试也不得把它们写成字符串常量——否则脱敏只做了一半，一推送即前功尽弃。
 | `app.js` `API_BASE` 常量 | 硬编码业务地址 | 运行时从服务地址输入框读取 |
 | `styles.css` | — | 新增 `.back-link` 与地址输入框样式 |
 

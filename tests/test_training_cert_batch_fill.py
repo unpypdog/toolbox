@@ -1,6 +1,7 @@
 """Test the training certificate batch fill page."""
 import base64
 import hashlib
+import re
 from pathlib import Path
 from playwright.sync_api import sync_playwright
 
@@ -11,6 +12,11 @@ FILE_URL = f"file:///{TOOL_DIR / 'index.html'}"
 SHEETJS_SHA256 = "cc015130aa8521e7f088f88898eba949ccdcbfb38df0bd129b44b7273c3a6f41"
 
 API_BASE = "https://api.example.test:8443"
+
+# 工具源码允许出现的外部主机：SVG 命名空间，以及 CSP 里的回环地址。
+# 任何其他主机都意味着业务地址被写死进了公开仓库。
+ALLOWED_HOSTS = {"www.w3.org", "localhost", "127.0.0.1"}
+HOST_RE = re.compile(r"https?://([A-Za-z0-9._-]+)")
 EXISTING_PHONE = "13700137000"
 PASSWORD = "secret-value"
 
@@ -134,17 +140,22 @@ def run():
             else:
                 print(f"[OK] Back link: {href}")
 
-        # Test 3: 源码不含业务地址与账号名
+        # Test 3: 工具源码不含任何外部主机
+        # 正向断言而非黑名单：写死业务地址、又或者将来换了个新地址，
+        # 都会在这里暴露，不必事先知道具体主机名。
         leaks = []
         for name in ("index.html", "app.js", "styles.css"):
-            source = (TOOL_DIR / name).read_text(encoding="utf-8").lower()
-            for needle in ("业务系统", "<业务主机>", "业务账号", "cdn.sheetjs.com"):
-                if needle in source:
-                    leaks.append(f"{name} contains '{needle}'")
+            source_path = TOOL_DIR / name
+            if not source_path.is_file():
+                errors.append(f"{name} missing; host scan skipped")
+                continue
+            for host in HOST_RE.findall(source_path.read_text(encoding="utf-8")):
+                if host not in ALLOWED_HOSTS:
+                    leaks.append(f"{name} references external host '{host}'")
         if leaks:
             errors.extend(leaks)
         else:
-            print("[OK] No business host or account name in source")
+            print("[OK] No external host references in the tool sources")
 
         # Test 4: SheetJS 已内置且与锁定的官方构建逐字节一致
         xlsx_path = TOOL_DIR / "xlsx.full.min.js"
