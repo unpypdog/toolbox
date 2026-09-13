@@ -145,6 +145,10 @@ def overflow_px(page):
 
 
 def run():
+    if not (TOOL_DIR / "index.html").is_file():
+        print("FAIL: tools/training-cert-batch-fill/index.html does not exist yet")
+        raise SystemExit(1)
+
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         context = browser.new_context(viewport={"width": 1280, "height": 900})
@@ -399,7 +403,13 @@ cd D:\project\toolbox
 uv run python tests/test_training_cert_batch_fill.py
 ```
 
-Expected: 失败。因为 `tools/training-cert-batch-fill/index.html` 还不存在，`page.goto` 会抛错或以空白页继续，紧接着 `Test 1` 报 `Page title is empty`，最终 `=== N ERROR(S) ===` 并以退出码 1 结束。
+Expected: 失败，且输出首行为：
+
+```
+FAIL: tools/training-cert-batch-fill/index.html does not exist yet
+```
+
+退出码 1。（`run()` 开头的守卫就是为此而加：否则 `page.goto` 会直接抛 Playwright 异常，看不出是预期中的 RED 还是测试本身写错了。）
 
 - [ ] **Step 3: Commit（TDD RED）**
 
