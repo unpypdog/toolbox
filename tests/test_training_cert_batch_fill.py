@@ -307,6 +307,21 @@ def run():
             errors.append(f"Mobile horizontal overflow: {mobile_overflow}px")
         else:
             print("[OK] No horizontal overflow on mobile 390 with the table rendered")
+
+        # Test 14b: 390px 下 h1 必须单行
+        # 折行不会产生横向溢出，overflow 断言查不出来，只能数行盒。
+        # 用 Range.getClientRects() 去重纵向坐标，而不是拿高度除以行高
+        # ——后者依赖 line-height: normal 的字体度量，换台机器就不准。
+        heading_lines = mobile_page.evaluate("""() => {
+          const h1 = document.querySelector('.brand-copy h1');
+          const range = document.createRange();
+          range.selectNodeContents(h1);
+          return new Set([...range.getClientRects()].map((r) => Math.round(r.y))).size;
+        }""")
+        if heading_lines != 1:
+            errors.append(f"h1 wraps to {heading_lines} lines at 390px (orphan check)")
+        else:
+            print("[OK] h1 stays on one line at 390px")
         mobile.close()
 
         # Test 15: 表头别名可识别
