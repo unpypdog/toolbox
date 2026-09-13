@@ -30,8 +30,8 @@ def run():
         # Test 2: Three tool cards exist
         cards = page.locator(".tool-card")
         card_count = cards.count()
-        if card_count != 3:
-            errors.append(f"Expected 3 tool cards, got {card_count}")
+        if card_count != 4:
+            errors.append(f"Expected 4 tool cards, got {card_count}")
         else:
             print(f"[OK] {card_count} tool cards found")
 
@@ -56,6 +56,13 @@ def run():
         else:
             print(f"[OK] Card 2 → tools/rmb-upper/index.html")
 
+        # Test 5b: Fourth card links to the certificate batch fill tool
+        fourth_link = cards.nth(3).get_attribute("href")
+        if fourth_link != "./tools/training-cert-batch-fill/index.html":
+            errors.append(f"Card 3: expected href './tools/training-cert-batch-fill/index.html', got '{fourth_link}'")
+        else:
+            print(f"[OK] Card 3 → tools/training-cert-batch-fill/index.html")
+
         # Test 6: Navigate to lung marker and back
         cards.nth(0).click()
         page.wait_for_load_state("networkidle")
@@ -74,7 +81,7 @@ def run():
         page.wait_for_load_state("networkidle")
         page.wait_for_timeout(300)
         cards2 = page.locator(".tool-card")
-        if cards2.count() != 3:
+        if cards2.count() != 4:
             errors.append("Back navigation to homepage failed")
         else:
             print("[OK] Back navigation to homepage works")
@@ -91,7 +98,7 @@ def run():
         back_link.click()
         page.wait_for_load_state("networkidle")
         page.wait_for_timeout(300)
-        if page.locator(".tool-card").count() != 3:
+        if page.locator(".tool-card").count() != 4:
             errors.append("Back link to homepage failed")
         else:
             print("[OK] Back link returns to homepage")
@@ -109,7 +116,7 @@ def run():
         back_link2.click()
         page.wait_for_load_state("networkidle")
         page.wait_for_timeout(300)
-        if page.locator(".tool-card").count() != 3:
+        if page.locator(".tool-card").count() != 4:
             errors.append("Back link from RMB converter to homepage failed")
         else:
             print("[OK] Full navigation cycle works")

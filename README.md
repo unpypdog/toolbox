@@ -29,6 +29,7 @@ uv run python tests/test_toolbox.py
 uv run python tests/test_lung_marker.py
 uv run python tests/test_rmb_upper.py
 uv run python tests/test_tax_calc.py
+uv run python tests/test_training_cert_batch_fill.py
 ```
 
 ## 工具列表
@@ -38,3 +39,4 @@ uv run python tests/test_tax_calc.py
 | 支气管分段标记 | `tools/lung-marker/` | 右下叶基底段顺序标记，支持后悔模式 |
 | 税点计算器 | `tools/tax-calc/` | 含税金额 ÷ 税率，一键算税前与税额 |
 | 人民币大写转换 | `tools/rmb-upper/` | 数字金额转大写，符合央行规范 |
+| 操作培训证书批量填充 | `tools/training-cert-batch-fill/` | 本地解析 CSV/Excel，批量新增用户 |
