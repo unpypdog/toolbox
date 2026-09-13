@@ -772,7 +772,7 @@ function normalizeApiBase(raw) {
     parsed.username ||
     parsed.password
   ) {
-    throw new Error("服务地址只填到主机和端口，不要带路径、参数或账号信息。");
+    throw new Error("请填接口地址，只到主机和端口。浏览器地址栏里的登录页地址不能直接用：它带路径，端口也常和接口不同。");
   }
   return value;
 }

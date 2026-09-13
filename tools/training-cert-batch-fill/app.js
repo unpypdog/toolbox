@@ -280,14 +280,16 @@ function normalizeApiBase(raw) {
   // 只接受「主机 + 端口」。带路径或参数会静默改变请求目标（拼出来是 /api/api/Login/login
   // 或 ?tenant=1/api/Login/login），带 userinfo 的还会把凭据写进 localStorage，
   // 直接违背「密码和令牌不落盘」的承诺——必须挡在存储之前。
-  if (
-    parsed.pathname !== "/" ||
-    parsed.search ||
-    parsed.hash ||
-    parsed.username ||
-    parsed.password
-  ) {
-    throw new Error("服务地址只填到主机和端口，不要带路径、参数或账号信息。");
+  if (parsed.username || parsed.password) {
+    throw new Error("服务地址里不要包含账号或密码，凭据请在下方单独填写。");
+  }
+  // 最常见的误操作是直接粘贴浏览器地址栏里的登录页地址。它带路径，而且
+  // 端口通常和接口不同——就算把路径去掉也连不通。所以要挡下来，而且要把
+  // 原因说清楚，否则操作者只会卡在同一个地方反复试。
+  if (parsed.pathname !== "/" || parsed.search || parsed.hash) {
+    throw new Error(
+      "请填接口地址，只到主机和端口。浏览器地址栏里的登录页地址不能直接用：它带路径，端口也常和接口不同。",
+    );
   }
   return value;
 }
