@@ -10,7 +10,8 @@ toolbox/
 ├── tools/                  # 各个工具，每个工具一个独立文件夹
 │   ├── lung-marker/        # 支气管分段标记
 │   ├── rmb-upper/          # 人民币大写转换
-│   └── tax-calc/           # 税点计算器
+│   ├── tax-calc/           # 税点计算器
+│   └── training-cert-batch-fill/  # 操作培训证书批量填充
 └── tests/                  # Playwright e2e 测试
 ```
 

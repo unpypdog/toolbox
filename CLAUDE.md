@@ -13,14 +13,20 @@ toolbox/
 │   │   └── index.html
 │   ├── rmb-upper/          # 人民币大写转换
 │   │   └── index.html
-│   └── tax-calc/           # 税点计算器
-│       └── index.html
+│   ├── tax-calc/           # 税点计算器
+│   │   └── index.html
+│   └── training-cert-batch-fill/   # 操作培训证书批量填充
+│       ├── index.html
+│       ├── app.js
+│       ├── styles.css
+│       └── xlsx.full.min.js
 └── tests/                  # 测试文件（Playwright e2e）
     ├── screenshots/        # 测试截图（gitignore）
     ├── test_lung_marker.py
     ├── test_rmb_upper.py
     ├── test_tax_calc.py
-    └── test_toolbox.py
+    ├── test_toolbox.py
+    └── test_training_cert_batch_fill.py
 ```
 
 ## 文件组织规则（必须遵守）
