@@ -1122,10 +1122,12 @@ Expected: `git status --short` 无输出（截图目录被 `*.png` 忽略）；`
 
 ```bash
 cd /d/project/toolbox
-git grep -n -i -E "业务主机关键词|业务账号关键词|业务端口" origin/master..HEAD
+git log -p origin/master..HEAD | grep -n -i -E "业务主机关键词|业务账号关键词|业务端口" || echo "干净"
 ```
 
-Expected: 无输出。命中就说明脱敏只做了一半，必须处理后再推送。
+Expected: `干净`，即无任何命中。命中就说明脱敏只做了一半，必须处理后再推送。
+
+注意**不要**写成 `git grep ... origin/master..HEAD`：`git grep` 不接受版本区间参数，会以 `fatal: unable to resolve revision` 报错退出——看起来像"没输出"，实际是命令压根没跑。用 `git log -p` 管道给 `grep`，才能覆盖每个提交的每一行差异（包括只存在于中间提交、后来被改掉的内容）。
 
 注意：这类关键词**不要**写进任何会被提交的文件（包括本计划、设计文档和测试），否则闸门自身就成了泄漏点。需要时用自己的记忆或本机笔记核对，测试里改用正向断言（见 Task 2 的 Test 3）。
 
