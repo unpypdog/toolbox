@@ -379,6 +379,21 @@ def run():
             errors.append(f"Mobile horizontal overflow: {mobile_overflow}px")
         else:
             print("[OK] No horizontal overflow on mobile 390 with the table rendered")
+
+        # Test 14b: 390px 下 h1 必须单行
+        # 折行不会产生横向溢出，overflow 断言查不出来，只能数行盒。
+        # 用 Range.getClientRects() 去重纵向坐标，而不是拿高度除以行高
+        # ——后者依赖 line-height: normal 的字体度量，换台机器就不准。
+        heading_lines = mobile_page.evaluate("""() => {
+          const h1 = document.querySelector('.brand-copy h1');
+          const range = document.createRange();
+          range.selectNodeContents(h1);
+          return new Set([...range.getClientRects()].map((r) => Math.round(r.y))).size;
+        }""")
+        if heading_lines != 1:
+            errors.append(f"h1 wraps to {heading_lines} lines at 390px (orphan check)")
+        else:
+            print("[OK] h1 stays on one line at 390px")
         mobile.close()
 
         # Test 15: 表头别名可识别
@@ -943,7 +958,33 @@ git commit -m "feat: 新增返回工具箱链接样式"
 ### Task 6: 跑通工具页全部测试
 
 **Files:**
-- 无新增；验证 Task 1–5 的产物
+- Modify: `tests/test_training_cert_batch_fill.py`
+- 其余为验证 Task 1–5 的产物
+
+- [ ] **Step 0: 补一条 h1 单行断言**
+
+Task 5 修掉的「390px 标题折成 9 字 + 孤字」是**没有任何断言覆盖**的——它折行而非溢出，`overflow` 检查看不见。代码质量审查实测确认：漏掉的那 1.1px 只能靠数行盒发现，且该断言在旧 CSS 上会返回 2（即确实能抓到回归）。
+
+在手机视口那段（`mobile_rows` / `mobile_overflow` 判断之后、`mobile.close()` 之前）插入：
+
+```python
+        # Test 14b: 390px 下 h1 必须单行
+        # 折行不会产生横向溢出，overflow 断言查不出来，只能数行盒。
+        # 用 Range.getClientRects() 去重纵向坐标，而不是拿高度除以行高
+        # ——后者依赖 line-height: normal 的字体度量，换台机器就不准。
+        heading_lines = mobile_page.evaluate("""() => {
+          const h1 = document.querySelector('.brand-copy h1');
+          const range = document.createRange();
+          range.selectNodeContents(h1);
+          return new Set([...range.getClientRects()].map((r) => Math.round(r.y))).size;
+        }""")
+        if heading_lines != 1:
+            errors.append(f"h1 wraps to {heading_lines} lines at 390px (orphan check)")
+        else:
+            print("[OK] h1 stays on one line at 390px")
+```
+
+不要用 `height / line-height` 来判断行数：`line-height: normal` 时行高由字体度量决定，换台机器结果就变了。不要断言 340px 附近的换行边界，那里只差 0.72px，本身就会随字体浮动——要断就断 390px。
 
 - [ ] **Step 1: 运行测试**
 
@@ -973,6 +1014,7 @@ Expected:
 [OK] Remembered service address restored on a fresh page
 [OK] No horizontal overflow on desktop 1280
 [OK] No horizontal overflow on mobile 390 with the table rendered
+[OK] h1 stays on one line at 390px
 [OK] Header aliases recognised
 [OK] XLSX parsed offline through the vendored SheetJS
 
@@ -1015,6 +1057,7 @@ with sync_playwright() as p:
     for label, width, height, scale in (
         ("desktop", 1280, 900, 1),
         ("mobile", 390, 844, 3),
+        ("mobile-320", 320, 844, 3),
     ):
         ctx = browser.new_context(
             viewport={"width": width, "height": height}, device_scale_factor=scale
@@ -1056,7 +1099,8 @@ Expected: 打印两行 `saved D:\project\toolbox\tests\screenshots\training-cert
 - 手机版表格在容器内横向滚动，中文未被压成单字竖排
 - 页面无横向溢出
 - **390px 下 h1「操作培训证书批量填充」是完整一行，末字没有孤行**（这条 `overflow` 断言查不出来，只能看）
-- **手机版顶栏高度不夸张**（应当明显矮于半个屏幕）
+- **320px 下标题折成 5+5 两行且长度接近**，不是「9 字 + 孤字」（`text-wrap: balance` 的效果，是本次改动引入的行为，值得人眼看一次）
+- **手机版顶栏高度不夸张**（实测 390px 下约 166px，占屏高不到 20%）
 
 - [ ] **Step 5: 确认三个文件都已提交且工作区干净**
 
