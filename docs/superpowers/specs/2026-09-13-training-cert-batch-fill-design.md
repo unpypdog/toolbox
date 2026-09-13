@@ -81,7 +81,10 @@ connect-src https: http://localhost:* http://127.0.0.1:*    放宽：地址运�
 ## 内置 SheetJS
 
 - 来源：`https://cdn.sheetjs.com/xlsx-0.20.3/package/dist/xlsx.full.min.js`（官方 0.20.3 构建，951,904 字节）
+- 校验和：`sha256:cc015130aa8521e7f088f88898eba949ccdcbfb38df0bd129b44b7273c3a6f41`，由 `tests/test_training_cert_batch_fill.py` 断言
+- 授权：SheetJS 社区版为 Apache-2.0，上游版权声明完整保留在文件首行
 - 落位：`tools/training-cert-batch-fill/xlsx.full.min.js`
+- 更新方式：下载同一 URL 时**必须带 `User-Agent`**（否则 403），然后同步更新上面的 sha256 与测试中的 `SHEETJS_SHA256` 常量
 - `index.html` 改为 `<script defer src="./xlsx.full.min.js">`
 - 收益：彻底离线可用、无第三方 CDN 依赖、`script-src` 可收紧为 `'self'`
 - 代价：仓库增加约 930KB

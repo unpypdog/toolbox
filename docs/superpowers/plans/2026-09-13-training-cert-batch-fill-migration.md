@@ -71,12 +71,15 @@ git commit -m "chore: 内置 SheetJS 0.20.3 到 training-cert-batch-fill"
 ```python
 """Test the training certificate batch fill page."""
 import base64
+import hashlib
 from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 PROJECT_ROOT = Path(__file__).parent.parent
 TOOL_DIR = PROJECT_ROOT / "tools" / "training-cert-batch-fill"
 FILE_URL = f"file:///{TOOL_DIR / 'index.html'}"
+
+SHEETJS_SHA256 = "cc015130aa8521e7f088f88898eba949ccdcbfb38df0bd129b44b7273c3a6f41"
 
 API_BASE = "https://api.example.test:8443"
 EXISTING_PHONE = "13700137000"
@@ -187,11 +190,19 @@ def run():
         else:
             print("[OK] No business host or account name in source")
 
-        # Test 4: SheetJS 已内置
-        if not (TOOL_DIR / "xlsx.full.min.js").is_file():
+        # Test 4: SheetJS 已内置且与锁定的官方构建逐字节一致
+        xlsx_path = TOOL_DIR / "xlsx.full.min.js"
+        if not xlsx_path.is_file():
             errors.append("xlsx.full.min.js is not vendored into the tool folder")
         else:
-            print("[OK] SheetJS vendored locally")
+            digest = hashlib.sha256(xlsx_path.read_bytes()).hexdigest()
+            if digest != SHEETJS_SHA256:
+                errors.append(
+                    f"Vendored SheetJS checksum mismatch: got {digest}, "
+                    f"expected {SHEETJS_SHA256}"
+                )
+            else:
+                print("[OK] SheetJS vendored and checksum matches the pinned build")
 
         # Test 5: CSP 收紧脚本源、仅在 connect 上放宽
         csp = page.locator("meta[http-equiv='Content-Security-Policy']").get_attribute("content") or ""
