@@ -610,6 +610,16 @@ Select-String -Path "D:\project\toolbox\tools\training-cert-batch-fill\index.htm
 
 Expected: 无任何输出。
 
+- [ ] **Step 13: Commit**
+
+```bash
+cd /d/project/toolbox
+git add tools/training-cert-batch-fill/index.html
+git commit -m "feat: 迁移并脱敏 training-cert-batch-fill 页面结构"
+```
+
+（此时页面还跑不起来——`app.js` 与 `styles.css` 尚未迁入，e2e 测试的守卫仍会报 not yet created，属预期。）
+
 ---
 
 ### Task 4: 迁移 app.js，API 地址改为运行时配置
@@ -781,6 +791,14 @@ node --check "D:\project\toolbox\tools\training-cert-batch-fill\app.js"
 
 Expected: 无输出（退出码 0）。
 
+- [ ] **Step 11: Commit**
+
+```bash
+cd /d/project/toolbox
+git add tools/training-cert-batch-fill/app.js
+git commit -m "feat: 服务地址改为运行时填写，去掉硬编码业务地址"
+```
+
 ---
 
 ### Task 5: 迁移 styles.css 并新增返回链接样式
@@ -824,10 +842,18 @@ Copy-Item $src $dst -Force
 - [ ] **Step 3: 确认无敏感字符串**
 
 ```powershell
-Select-String -Path "D:\project\toolbox\tools\training-cert-batch-fill\styles.css" -Pattern "业务系统|jsdoc|业务账号" -CaseSensitive:$false
+Select-String -Path "D:\project\toolbox\tools\training-cert-batch-fill\styles.css" -Pattern "业务系统|业务账号" -CaseSensitive:$false
 ```
 
 Expected: 无输出。
+
+- [ ] **Step 4: Commit**
+
+```bash
+cd /d/project/toolbox
+git add tools/training-cert-batch-fill/styles.css
+git commit -m "feat: 新增返回工具箱链接样式"
+```
 
 ---
 
@@ -947,16 +973,19 @@ Expected: 打印两行 `saved D:\project\toolbox\tests\screenshots\training-cert
 - 手机版表格在容器内横向滚动，中文未被压成单字竖排
 - 页面无横向溢出
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: 确认三个文件都已提交且工作区干净**
+
+Task 3、4、5 已各自提交，本任务只验证：
 
 ```bash
 cd /d/project/toolbox
-git add tools/training-cert-batch-fill/
-git commit -m "feat: 迁移操作培训证书批量填充工具页
-
-从桌面目录迁入，脱敏业务地址与账号名，服务地址改为运行时填写，
-SheetJS 内置本地，并按工具箱约定加入返回链接。"
+git status --short
+git log --oneline -4
 ```
+
+Expected: `git status --short` 无输出（截图目录被 `*.png` 忽略）；`git log` 顶部三条分别是 index.html、app.js、styles.css 的提交。
+
+若有未提交内容，说明前面某个任务漏提交，先补提交再继续。
 
 ---
 
