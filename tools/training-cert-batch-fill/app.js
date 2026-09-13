@@ -381,13 +381,23 @@ async function requestJson(path, options = {}) {
       return requestJson(path, { ...options, retryAuth: false });
     }
     const text = await response.text();
-    let parsed;
+    let parsed = null;
     try {
       parsed = text ? JSON.parse(text) : {};
     } catch {
+      parsed = null;
+    }
+    if (!response.ok) {
+      // 服务端报错时经常直接回纯文本——例如登录失败回的是「用户名或密码错误」，
+      // Content-Type 是 text/plain。JSON.parse 会失败，但那段文本恰恰是操作者
+      // 唯一需要看到的信息，不能换成一句泛泛的「非 JSON 内容」。
+      const detail =
+        (parsed && parsed.message) || text.trim() || `HTTP ${response.status}`;
+      throw new Error(detail);
+    }
+    if (parsed === null) {
       throw new Error(`接口返回非 JSON 内容（HTTP ${response.status}）`);
     }
-    if (!response.ok) throw new Error(parsed.message || `HTTP ${response.status}`);
     return parsed;
   } catch (error) {
     if (error.name === "AbortError") throw new Error("请求超时，请检查网络后重试");
