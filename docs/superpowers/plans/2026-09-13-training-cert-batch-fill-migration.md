@@ -811,10 +811,14 @@ async function connect({ quiet = false } = {}) {
 - [ ] **Step 9: 确认没有遗漏的常量引用与敏感字符串**
 
 ```powershell
-Select-String -Path "D:\project\toolbox\tools\training-cert-batch-fill\app.js" -Pattern "https?://|API_BASE[^_]|downloadText\(" -CaseSensitive:$false
+Select-String -Path "D:\project\toolbox\tools\training-cert-batch-fill\app.js" -Pattern "https?://[A-Za-z0-9]|API_BASE\b(?!_)|业务系统|业务账号"
 ```
 
-Expected: 无输出。（`API_BASE_STORAGE_KEY` 带下划线，会被 `API_BASE[^_]` 排除；若命中 `API_BASE` 的其他用法即为漏改。`downloadText(` 也应无命中——Step 7 必须把所有调用点都写成 `downloadText(`——若命中说明有调用点还带着旧参数写法，需对照 Step 7。）
+Expected: 无输出。
+
+用 `https?://[A-Za-z0-9]` 而不是裸的 `https?://`：Step 6 的三条错误提示文案里写着「形如 https://服务器地址:端口」「必须以 http:// 或 https:// 开头」，这些是给人看的说明文字，竖线后面跟的是中文或空格，不会命中；而任何真实写成 `https://某主机` 的残留都会命中。这也正是 e2e 测试里 `HOST_RE` 的判定口径。
+
+`API_BASE\b(?!_)` 会放过 `API_BASE_STORAGE_KEY`，命中其他 `API_BASE` 用法即为漏改。若这个 PowerShell 版本不支持负向先行断言，改用手工确认：该文件里 `API_BASE` 只应出现在 `API_BASE_STORAGE_KEY` 这一个标识符中。
 
 - [ ] **Step 10: 语法检查**
 
