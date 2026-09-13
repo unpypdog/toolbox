@@ -748,7 +748,13 @@ function showToast(message, tone = "success") {
 function humanizeNetworkError(error) {
   const message = error?.message || String(error);
   if (/Failed to fetch|NetworkError/i.test(message)) {
-    return "无法访问业务接口。请检查网络、HTTPS 证书或接口的跨域设置。";
+    // 浏览器出于安全考虑不会把失败原因告诉脚本——跨域被拒、证书有问题、
+    // 端口不通，全都表现成同一句 Failed to fetch，只有控制台能看到真正原因。
+    // 所以这里只能按这个工具的实际踩坑顺序提示：排第一的是填错地址。
+    // 操作者常把浏览器里打开的登录页地址当接口地址填进来，而两者端口通常
+    // 不同，登录页也不会返回跨域头——现象和"网络不通"一模一样。
+    const target = state.apiBase ? `${state.apiBase} 的接口` : "业务接口";
+    return `无法访问 ${target}。请先确认服务地址有没有填错——登录页的地址和接口地址通常不是同一个端口。地址确认无误后，再检查网络、代理、HTTPS 证书或跨域设置。`;
   }
   return message;
 }
