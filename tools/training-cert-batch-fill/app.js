@@ -25,6 +25,7 @@ const STATUS = {
 const state = {
   file: null,
   records: [],
+  encoding: "",
   apiBase: "",
   connected: false,
   token: "",
@@ -116,9 +117,18 @@ async function loadFile(file) {
 
   setNotice("正在本地解析文件…");
   try {
-    const matrix = extension === "csv" ? await readCsv(file) : await readWorkbook(file);
+    let matrix;
+    let encoding = "";
+    if (extension === "csv") {
+      const decoded = decodeCsv(await file.arrayBuffer());
+      matrix = parseCsv(decoded.text);
+      encoding = decoded.encoding;
+    } else {
+      matrix = await readWorkbook(file);
+    }
     state.file = file;
-    state.records = matrixToRecords(matrix);
+    state.encoding = encoding;
+    state.records = matrixToRecords(matrix, encoding);
     resetRunState();
     const problems = state.records.filter((record) => record.status === "invalid").length;
     setNotice(
@@ -138,9 +148,37 @@ async function loadFile(file) {
   }
 }
 
-async function readCsv(file) {
-  const text = await file.text();
-  return parseCsv(text.replace(/^\uFEFF/, ""));
+// \u4E2D\u6587 Windows \u4E0A Excel \u5B58\u51FA\u6765\u7684 CSV \u9ED8\u8BA4\u662F GBK\uFF08\u7CFB\u7EDF ANSI \u4EE3\u7801\u9875\uFF09\uFF0C
+// \u800C File.text() \u6C38\u8FDC\u6309 UTF-8 \u89E3\u7801\u2014\u2014\u4E2D\u6587\u8868\u5934\u4F1A\u53D8\u6210\u4E71\u7801\uFF0C\u62A5\u201C\u7F3A\u5C11\u5FC5\u8981\u8868\u5934\u201D\uFF0C
+// \u4F7F\u7528\u8005\u770B\u5230\u7684\u5374\u662F\u6587\u4EF6\u660E\u660E\u6CA1\u95EE\u9898\u3002\u6240\u4EE5\u81EA\u5DF1\u8BFB\u5B57\u8282\u5224\u65AD\u7F16\u7801\u3002
+const FALLBACK_ENCODINGS = ["gbk", "big5"];
+
+function decodeCsv(buffer) {
+  const bytes = new Uint8Array(buffer);
+  if (bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf) {
+    return { text: new TextDecoder("utf-8").decode(bytes.subarray(3)), encoding: "utf-8-bom" };
+  }
+  if (bytes[0] === 0xff && bytes[1] === 0xfe) {
+    return { text: new TextDecoder("utf-16le").decode(bytes.subarray(2)), encoding: "utf-16le" };
+  }
+  if (bytes[0] === 0xfe && bytes[1] === 0xff) {
+    return { text: new TextDecoder("utf-16be").decode(bytes.subarray(2)), encoding: "utf-16be" };
+  }
+  try {
+    // \u7528 fatal \u8BA9\u975E\u6CD5\u5B57\u8282\u76F4\u63A5\u629B\u9519\uFF0C\u800C\u4E0D\u662F\u9759\u9ED8\u66FF\u6362\u6210\u66FF\u6362\u5B57\u7B26\u3002
+    // \u5426\u5219 GBK \u6587\u4EF6\u4F1A\u88AB\u201C\u6210\u529F\u201D\u89E3\u7801\u6210\u4E00\u5806\u95EE\u53F7\uFF0C\u53CD\u800C\u66F4\u96BE\u67E5\u3002
+    return { text: new TextDecoder("utf-8", { fatal: true }).decode(bytes), encoding: "utf-8" };
+  } catch {
+    // \u4E0D\u662F\u5408\u6CD5 UTF-8\uFF0C\u7EE7\u7EED\u5F80\u4E0B\u8BD5
+  }
+  for (const encoding of FALLBACK_ENCODINGS) {
+    try {
+      return { text: new TextDecoder(encoding, { fatal: true }).decode(bytes), encoding };
+    } catch {
+      // \u6362\u4E0B\u4E00\u4E2A\u5019\u9009
+    }
+  }
+  throw new Error("\u65E0\u6CD5\u8BC6\u522B\u6587\u4EF6\u7F16\u7801\u3002\u8BF7\u628A\u6587\u4EF6\u53E6\u5B58\u4E3A UTF-8 \u6216 GBK \u7F16\u7801\u7684 CSV \u540E\u91CD\u8BD5\u3002");
 }
 
 async function readWorkbook(file) {
@@ -192,7 +230,7 @@ function parseCsv(text) {
   return rows;
 }
 
-function matrixToRecords(matrix) {
+function matrixToRecords(matrix, encoding = "") {
   const nonEmptyRows = matrix.filter((row) => Array.isArray(row) && row.some((cell) => String(cell).trim()));
   if (nonEmptyRows.length < 2) throw new Error("文件中没有可导入的数据行。")
   const headers = nonEmptyRows[0].map(normalizeHeader);
@@ -203,7 +241,12 @@ function matrixToRecords(matrix) {
   const missing = ["userName", "phone", "unitName"].filter((field) => columnMap[field] < 0);
   if (missing.length) {
     const labels = { userName: "姓名", phone: "手机号", unitName: "单位名称" };
-    throw new Error(`缺少必要表头：${missing.map((field) => labels[field]).join("、")}`);
+    // 带上实际用的编码：如果这里显示 utf-8 而文件确实是 GBK，
+    // 说明解码走错了分支，有了这个信息就不必再猜。
+    const decoded = encoding ? `（按 ${encoding.toUpperCase()} 解码）` : "";
+    throw new Error(
+      `缺少必要表头：${missing.map((field) => labels[field]).join("、")}${decoded}。请确认首行是列名，且文件编码为 UTF-8 或 GBK。`,
+    );
   }
 
   const seenPhones = new Map();
@@ -576,6 +619,7 @@ function clearFile() {
   if (state.importing) return;
   state.file = null;
   state.records = [];
+  state.encoding = "";
   els.fileInput.value = "";
   resetRunState();
   setNotice("选择文件后，系统会在本地检查表头、必填项、手机号格式和重复项。")
@@ -587,7 +631,13 @@ function render() {
   els.fileSummary.classList.toggle("is-empty", !hasFile);
   els.fileName.textContent = hasFile ? state.file.name : "尚未选择文件";
   els.fileMeta.textContent = hasFile
-    ? `${formatBytes(state.file.size)} · ${state.records.length.toLocaleString("zh-CN")} 条`
+    ? [
+        formatBytes(state.file.size),
+        `${state.records.length.toLocaleString("zh-CN")} 条`,
+        state.encoding ? state.encoding.toUpperCase() : "",
+      ]
+        .filter(Boolean)
+        .join(" · ")
     : "支持 .csv / .xlsx / .xls";
   els.emptyState.hidden = hasFile;
   els.tableRegion.hidden = !hasFile;

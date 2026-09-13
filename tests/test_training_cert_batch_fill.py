@@ -377,6 +377,37 @@ def run():
                 print("[OK] XLSX parsed offline through the vendored SheetJS")
             xlsx_page.close()
 
+        # Test 17: 非 UTF-8 编码的 CSV 也要能解析
+        # 中文 Windows 上 Excel 存出的 CSV 默认是 GBK，而 File.text() 只按 UTF-8
+        # 解码，中文表头会变成乱码——报出来的却是“缺少必要表头”，
+        # 使用者看到的则是文件明明没问题。这条断言锁住编码回退逻辑。
+        gbk_page = context.new_page()
+        gbk_page.goto(FILE_URL)
+        gbk_page.wait_for_load_state("networkidle")
+        gbk_page.wait_for_timeout(400)
+        gbk_page.set_input_files(
+            "#fileInput",
+            {
+                "name": "gbk.csv",
+                "mimeType": "text/csv",
+                "buffer": (
+                    "姓名,手机号,单位名称,地址\n"
+                    "张三,13800138000,示例医院,北京市海淀区示例路1号\n"
+                ).encode("gbk"),
+            },
+        )
+        gbk_page.wait_for_timeout(600)
+        gbk_total = gbk_page.locator("#statTotal").inner_text().strip()
+        gbk_ready = gbk_page.locator("#statReady").inner_text().strip()
+        gbk_meta = gbk_page.locator("#fileMeta").inner_text().strip()
+        if gbk_total != "1" or gbk_ready != "1":
+            errors.append(f"GBK CSV not parsed: total={gbk_total} ready={gbk_ready}")
+        elif "GBK" not in gbk_meta.upper():
+            errors.append(f"Detected encoding not surfaced in the file summary: {gbk_meta}")
+        else:
+            print(f"[OK] GBK CSV parsed; summary reads '{gbk_meta}'")
+        gbk_page.close()
+
         if errors:
             print(f"\n=== {len(errors)} ERROR(S) ===")
             for e in errors:
