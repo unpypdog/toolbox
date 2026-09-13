@@ -1,0 +1,255 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="在浏览器本地解析 CSV 或 Excel，并批量新增用户。"
+    />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src https: http://localhost:* http://127.0.0.1:*; object-src 'none'; base-uri 'self'; form-action 'self'"
+    />
+    <title>操作培训证书批量填充</title>
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%230c1822'/%3E%3Crect x='18' y='12' width='28' height='40' rx='3' fill='none' stroke='%235ce1c5' stroke-width='4'/%3E%3Cpath d='M24 26h16M24 34h16M24 42h10' stroke='%235ce1c5' stroke-width='3.5' stroke-linecap='round'/%3E%3Ccircle cx='47' cy='50' r='5' fill='%23ff8b5d'/%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+    <script defer src="./xlsx.full.min.js"></script>
+    <script defer src="./app.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#workspace">跳到导入工作区</a>
+
+    <header class="masthead">
+      <div class="brand-mark" aria-hidden="true">证</div>
+      <div class="brand-copy">
+        <a class="back-link" href="../../index.html">&#x2190; 返回工具箱</a>
+        <p class="eyebrow">CERT DATA OPERATIONS</p>
+        <h1>操作培训证书批量填充</h1>
+      </div>
+      <div class="privacy-badge" title="文件、密码和令牌不会保存到 GitHub">
+        <span class="privacy-badge__dot" aria-hidden="true"></span>
+        本地解析 · 不留凭据
+      </div>
+    </header>
+
+    <main id="workspace" class="workspace">
+      <aside class="control-rail" aria-label="导入设置">
+        <section class="panel panel--file" aria-labelledby="file-heading">
+          <div class="panel-number" aria-hidden="true">01</div>
+          <div class="panel-heading">
+            <h2 id="file-heading">选择数据文件</h2>
+            <button id="downloadTemplateBtn" class="text-button" type="button">下载模板</button>
+          </div>
+
+          <label id="dropZone" class="drop-zone" for="fileInput" tabindex="0">
+            <input id="fileInput" type="file" accept=".csv,.xlsx,.xls" />
+            <span class="drop-zone__icon" aria-hidden="true">
+              <svg viewBox="0 0 24 24" fill="none">
+                <path d="M12 15V3m0 0L7 8m5-5 5 5M5 13v6h14v-6" />
+              </svg>
+            </span>
+            <strong>拖入 CSV 或 Excel</strong>
+            <span>也可以点击选择 · 最大建议 5,000 行</span>
+          </label>
+
+          <div id="fileSummary" class="file-summary is-empty" aria-live="polite">
+            <span id="fileName">尚未选择文件</span>
+            <span id="fileMeta">支持 .csv / .xlsx / .xls</span>
+          </div>
+        </section>
+
+        <section class="panel panel--access" aria-labelledby="access-heading">
+          <div class="panel-number" aria-hidden="true">02</div>
+          <div class="panel-heading">
+            <h2 id="access-heading">连接系统</h2>
+            <span id="connectionPill" class="connection-pill" data-state="idle">
+              <span aria-hidden="true"></span><b>未连接</b>
+            </span>
+          </div>
+
+          <form id="loginForm" class="login-form">
+            <label>
+              <span>服务地址</span>
+              <input
+                id="apiBaseInput"
+                name="apiBase"
+                type="text"
+                inputmode="url"
+                autocomplete="off"
+                spellcheck="false"
+                placeholder="https://服务器地址:端口"
+              />
+            </label>
+            <label>
+              <span>账号</span>
+              <input id="usernameInput" name="username" autocomplete="username" placeholder="登录账号" required />
+            </label>
+            <label>
+              <span>密码</span>
+              <span class="password-wrap">
+                <input
+                  id="passwordInput"
+                  name="password"
+                  type="password"
+                  autocomplete="current-password"
+                  placeholder="仅在当前页面内存中使用"
+                  required
+                />
+                <button id="togglePasswordBtn" type="button" aria-label="显示密码">显示</button>
+              </span>
+            </label>
+            <button id="connectBtn" class="button button--secondary" type="submit">
+              <span>测试连接</span>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 18 6-6-6-6" /></svg>
+            </button>
+          </form>
+
+          <p class="security-note">
+            服务地址会保存在本机浏览器；密码和令牌不会写入 LocalStorage、Cookie 或仓库，刷新页面即清除。
+          </p>
+        </section>
+
+        <section class="panel panel--action" aria-labelledby="action-heading">
+          <div class="panel-number" aria-hidden="true">03</div>
+          <div class="panel-heading">
+            <h2 id="action-heading">执行导入</h2>
+          </div>
+          <div class="action-stack">
+            <button id="startImportBtn" class="button button--primary" type="button" disabled>
+              <span>开始导入</span>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5" /></svg>
+            </button>
+            <button id="stopImportBtn" class="button button--danger" type="button" hidden>
+              完成当前条后停止
+            </button>
+            <button id="exportBtn" class="button button--ghost" type="button" disabled>
+              导出处理结果
+            </button>
+          </div>
+          <div id="progressBlock" class="progress-block" hidden>
+            <div class="progress-copy">
+              <span id="progressText">准备中</span>
+              <strong id="progressPercent">0%</strong>
+            </div>
+            <div class="progress-track" aria-hidden="true">
+              <span id="progressBar"></span>
+            </div>
+          </div>
+        </section>
+      </aside>
+
+      <section class="data-stage" aria-labelledby="preview-heading">
+        <div class="stage-header">
+          <div>
+            <p class="eyebrow">LOCAL PREVIEW</p>
+            <h2 id="preview-heading">数据预检</h2>
+          </div>
+          <div class="stage-actions">
+            <label class="filter-label" for="statusFilter">
+              <span>显示</span>
+              <select id="statusFilter">
+                <option value="all">全部记录</option>
+                <option value="problem">仅问题项</option>
+                <option value="pending">待导入</option>
+                <option value="done">已处理</option>
+              </select>
+            </label>
+            <button id="clearBtn" class="icon-button" type="button" disabled title="清空当前文件" aria-label="清空当前文件">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5" /></svg>
+            </button>
+          </div>
+        </div>
+
+        <div class="stats-grid" aria-label="数据统计">
+          <article class="stat-card stat-card--total">
+            <span>文件记录</span><strong id="statTotal">0</strong><small>ROWS</small>
+          </article>
+          <article class="stat-card stat-card--ready">
+            <span>校验通过</span><strong id="statReady">0</strong><small>READY</small>
+          </article>
+          <article class="stat-card stat-card--problem">
+            <span>需要处理</span><strong id="statProblem">0</strong><small>CHECK</small>
+          </article>
+          <article class="stat-card stat-card--success">
+            <span>新增成功</span><strong id="statSuccess">0</strong><small>CREATED</small>
+          </article>
+        </div>
+
+        <div id="noticeBar" class="notice-bar" role="status" aria-live="polite">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v5m0 3h.01M10.3 3.9 2.6 17.2A2 2 0 0 0 4.3 20h15.4a2 2 0 0 0 1.7-2.8L13.7 3.9a2 2 0 0 0-3.4 0Z" /></svg>
+          <span>选择文件后，系统会在本地检查表头、必填项、手机号格式和重复项。</span>
+        </div>
+
+        <div id="emptyState" class="empty-state">
+          <div class="empty-state__graphic" aria-hidden="true">
+            <span></span><span></span><span></span><span></span>
+          </div>
+          <h3>等待数据</h3>
+          <p>文件内容不会上传到 GitHub。只有确认导入后，合格记录才会发送到业务系统。</p>
+        </div>
+
+        <div id="tableRegion" class="table-region" hidden>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">行号</th>
+                  <th scope="col">姓名</th>
+                  <th scope="col">手机号</th>
+                  <th scope="col">单位名称</th>
+                  <th scope="col">地址</th>
+                  <th scope="col">状态</th>
+                </tr>
+              </thead>
+              <tbody id="previewBody"></tbody>
+            </table>
+          </div>
+          <p id="tableFootnote" class="table-footnote"></p>
+        </div>
+
+        <section id="activityPanel" class="activity-panel" aria-labelledby="activity-heading" hidden>
+          <div class="activity-heading">
+            <h3 id="activity-heading">运行记录</h3>
+            <span id="activityClock"></span>
+          </div>
+          <ol id="activityLog" aria-live="polite"></ol>
+        </section>
+      </section>
+    </main>
+
+    <footer>
+      <span>STATIC CLIENT / 服务地址由使用者填写</span>
+      <span>数据仅在本机浏览器解析</span>
+    </footer>
+
+    <dialog id="confirmDialog" class="confirm-dialog">
+      <form method="dialog">
+        <div class="dialog-mark" aria-hidden="true">!</div>
+        <p class="eyebrow">FINAL CHECK</p>
+        <h2>确认开始导入？</h2>
+        <p id="confirmCopy"></p>
+        <div class="dialog-facts">
+          <span><b id="confirmReady">0</b> 条待检查</span>
+          <span><b id="confirmInvalid">0</b> 条无效跳过</span>
+        </div>
+        <label class="confirm-check">
+          <input id="confirmCheckbox" type="checkbox" />
+          <span>我已核对预览数据，确认写入正式系统</span>
+        </label>
+        <div class="dialog-actions">
+          <button class="button button--ghost" value="cancel">返回检查</button>
+          <button id="confirmImportBtn" class="button button--primary" value="default" disabled>
+            确认导入
+          </button>
+        </div>
+      </form>
+    </dialog>
+
+    <div id="toastRegion" class="toast-region" aria-live="assertive" aria-atomic="true"></div>
+  </body>
+</html>
