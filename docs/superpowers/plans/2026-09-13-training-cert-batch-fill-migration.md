@@ -144,9 +144,23 @@ def overflow_px(page):
     )
 
 
+EXPECTED_TITLE = "操作培训证书批量填充"
+
+REQUIRED_IDS = (
+    "fileInput", "apiBaseInput", "usernameInput", "passwordInput", "connectBtn",
+    "connectionPill", "startImportBtn", "confirmCheckbox", "confirmImportBtn",
+    "exportBtn", "previewBody", "statTotal", "statReady", "statProblem",
+)
+
+
 def run():
+    missing = []
     if not (TOOL_DIR / "index.html").is_file():
-        print("FAIL: tools/training-cert-batch-fill/index.html does not exist yet")
+        missing.append("tools/training-cert-batch-fill/index.html")
+    if not (TOOL_DIR / "app.js").is_file():
+        missing.append("tools/training-cert-batch-fill/app.js")
+    if missing:
+        print("FAIL: not yet created — " + ", ".join(missing))
         raise SystemExit(1)
 
     with sync_playwright() as p:
@@ -160,10 +174,21 @@ def run():
         errors = []
         insert_payloads = []
 
-        # Test 1: 页面加载
+        # Test 0: 关键元素齐全——避免后续断言退化成 30 秒超时
+        absent = [fid for fid in REQUIRED_IDS if page.locator(f"#{fid}").count() != 1]
+        if absent:
+            errors.append(f"Missing required elements: {', '.join(absent)}")
+            print(f"\n=== {len(errors)} ERROR(S) ===")
+            for e in errors:
+                print(f"  FAIL: {e}")
+            browser.close()
+            raise SystemExit(1)
+        print(f"[OK] All {len(REQUIRED_IDS)} required elements present")
+
+        # Test 1: 页面标题
         title = page.title()
-        if not title:
-            errors.append("Page title is empty")
+        if title != EXPECTED_TITLE:
+            errors.append(f"Page title expected '{EXPECTED_TITLE}', got '{title}'")
         else:
             print(f"[OK] Page title: {title}")
 
@@ -181,14 +206,12 @@ def run():
                 print(f"[OK] Back link: {href}")
 
         # Test 3: 源码不含业务地址与账号名
-        html = (TOOL_DIR / "index.html").read_text(encoding="utf-8")
-        app_js = (TOOL_DIR / "app.js").read_text(encoding="utf-8")
         leaks = []
-        for needle in ("业务系统", "<业务主机>", "业务账号", "cdn.sheetjs.com"):
-            if needle in html.lower():
-                leaks.append(f"index.html contains '{needle}'")
-            if needle in app_js.lower():
-                leaks.append(f"app.js contains '{needle}'")
+        for name in ("index.html", "app.js", "styles.css"):
+            source = (TOOL_DIR / name).read_text(encoding="utf-8").lower()
+            for needle in ("业务系统", "<业务主机>", "业务账号", "cdn.sheetjs.com"):
+                if needle in source:
+                    leaks.append(f"{name} contains '{needle}'")
         if leaks:
             errors.extend(leaks)
         else:
@@ -298,11 +321,26 @@ def run():
           return out.join(";");
         }""")
         if stored == "__unavailable__":
-            print("[OK] localStorage unavailable under file:// (address simply not remembered)")
+            errors.append(
+                "localStorage unreadable: address persistence and credential checks unverified"
+            )
         elif PASSWORD in stored or "mock-token" in stored:
             errors.append(f"Credential leaked into localStorage: {stored}")
+        elif f"training-cert-batch-fill.apiBase={API_BASE}" not in stored:
+            errors.append(f"Service address was not remembered: {stored or '(empty)'}")
         else:
-            print(f"[OK] No credential in localStorage: {stored or '(empty)'}")
+            print(f"[OK] Service address remembered, no credential stored: {stored}")
+
+        # Test 12b: 新开页面时地址自动回填（同 origin 共享 localStorage）
+        restored = context.new_page()
+        restored.goto(FILE_URL)
+        restored.wait_for_load_state("networkidle")
+        restored.wait_for_timeout(400)
+        if restored.locator("#apiBaseInput").input_value() != API_BASE:
+            errors.append("Remembered service address was not restored on a fresh page")
+        else:
+            print("[OK] Remembered service address restored on a fresh page")
+        restored.close()
 
         # Test 13: 桌面无横向溢出
         desktop_overflow = overflow_px(page)
@@ -321,8 +359,11 @@ def run():
         mobile_page.wait_for_timeout(300)
         mobile_page.set_input_files("#fileInput", csv_upload("fixture.csv", FIXTURE_CSV))
         mobile_page.wait_for_timeout(500)
+        mobile_rows = mobile_page.locator("#previewBody tr").count()
         mobile_overflow = overflow_px(mobile_page)
-        if mobile_overflow > 1:
+        if mobile_rows != 5:
+            errors.append(f"Mobile page did not render the table: {mobile_rows} rows")
+        elif mobile_overflow > 1:
             errors.append(f"Mobile horizontal overflow: {mobile_overflow}px")
         else:
             print("[OK] No horizontal overflow on mobile 390 with the table rendered")
@@ -406,7 +447,7 @@ uv run python tests/test_training_cert_batch_fill.py
 Expected: 失败，且输出首行为：
 
 ```
-FAIL: tools/training-cert-batch-fill/index.html does not exist yet
+FAIL: not yet created — tools/training-cert-batch-fill/index.html, tools/training-cert-batch-fill/app.js
 ```
 
 退出码 1。（`run()` 开头的守卫就是为此而加：否则 `page.goto` 会直接抛 Playwright 异常，看不出是预期中的 RED 还是测试本身写错了。）
@@ -517,12 +558,13 @@ data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'
                 autocomplete="off"
                 spellcheck="false"
                 placeholder="https://服务器地址:端口"
-                required
               />
             </label>
 ```
 
 （`.login-form input` 已有通用样式，无需新增 CSS。）
+
+**这里不要加 `required`，也不要给 `<form>` 加 `novalidate`。** 加 `required` 会让浏览器原生约束校验在地址为空时直接吞掉 submit 事件——`app.js` 绑在 form 的 `submit` 上，于是 `normalizeApiBase` 永远不执行，`setConnection("error", …)` 也不执行，Test 8 必然失败。空地址的拒绝逻辑由 JS 校验负责，这是设计意图。
 
 - [ ] **Step 9: 去掉账号预填**
 
@@ -803,10 +845,11 @@ uv run python tests/test_training_cert_batch_fill.py
 
 Expected:
 ```
+[OK] All 14 required elements present
 [OK] Page title: 操作培训证书批量填充
 [OK] Back link: ../../index.html
 [OK] No business host or account name in source
-[OK] SheetJS vendored locally
+[OK] SheetJS vendored and checksum matches the pinned build
 [OK] CSP narrowed for scripts, relaxed for connect only
 [OK] Username input not prefilled
 [OK] #statTotal = 5
@@ -817,7 +860,8 @@ Expected:
 [OK] Connected using the runtime service address
 [OK] Insert payload matches the API contract exactly
 [OK] Existing phone skipped without an insert request
-[OK] No credential in localStorage: ...
+[OK] Service address remembered, no credential stored: training-cert-batch-fill.apiBase=https://api.example.test:8443
+[OK] Remembered service address restored on a fresh page
 [OK] No horizontal overflow on desktop 1280
 [OK] No horizontal overflow on mobile 390 with the table rendered
 [OK] Header aliases recognised
@@ -1001,6 +1045,14 @@ SheetJS 内置本地，并按工具箱约定加入返回链接。"
 
 ```markdown
 | 操作培训证书批量填充 | `tools/training-cert-batch-fill/` | 本地解析 CSV/Excel，批量新增用户 |
+```
+
+- [ ] **Step 5b: 更新 README 的运行测试命令列表**
+
+`README.md` 的「运行测试」代码块目前只列了 4 个测试文件。在 `uv run python tests/test_tax_calc.py` 之后追加一行：
+
+```bash
+uv run python tests/test_training_cert_batch_fill.py
 ```
 
 - [ ] **Step 6: 跑首页测试**
