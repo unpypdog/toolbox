@@ -277,6 +277,18 @@ function normalizeApiBase(raw) {
   if (parsed.protocol === "http:" && !["localhost", "127.0.0.1"].includes(parsed.hostname)) {
     throw new Error("明文 http 仅允许 localhost 或 127.0.0.1，其他地址请使用 https://。");
   }
+  // 只接受「主机 + 端口」。带路径或参数会静默改变请求目标（拼出来是 /api/api/Login/login
+  // 或 ?tenant=1/api/Login/login），带 userinfo 的还会把凭据写进 localStorage，
+  // 直接违背「密码和令牌不落盘」的承诺——必须挡在存储之前。
+  if (
+    parsed.pathname !== "/" ||
+    parsed.search ||
+    parsed.hash ||
+    parsed.username ||
+    parsed.password
+  ) {
+    throw new Error("服务地址只填到主机和端口，不要带路径、参数或账号信息。");
+  }
   return value;
 }
 
@@ -285,7 +297,13 @@ async function connect({ quiet = false } = {}) {
   try {
     apiBase = normalizeApiBase(els.apiBaseInput.value);
   } catch (error) {
+    // 地址一旦非法，之前的连接就不再可信：若只改提示而不清会话，
+    // 连接状态会停留在 true，「开始导入」按钮仍可点，点下去会往
+    // 上一个地址写入——UI 在撒谎，而且写错了地方。
+    state.connected = false;
+    state.token = "";
     setConnection("error", "地址无效");
+    updateActionState();
     if (!quiet) showToast(error.message, "error");
     throw error;
   }
