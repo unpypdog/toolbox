@@ -12,10 +12,14 @@ FILE_URL = f"file:///{TOOL_DIR / 'index.html'}"
 SHEETJS_SHA256 = "cc015130aa8521e7f088f88898eba949ccdcbfb38df0bd129b44b7273c3a6f41"
 
 API_BASE = "https://api.example.test:8443"
+DEFAULT_API_BASE = "https://z.fibrotouch.com:3962"
 
 # 工具源码允许出现的外部主机：SVG 命名空间，以及 CSP 里的回环地址。
-# 任何其他主机都意味着业务地址被写死进了公开仓库。
+# 除此之外只给默认预填的业务地址开一个口子，且限定它只能出现在 app.js——
+# 这个地址出现在模板、样式或说明文案里，同样说明护栏被绕开了。
 ALLOWED_HOSTS = {"www.w3.org", "localhost", "127.0.0.1"}
+DEFAULT_API_HOST = "z.fibrotouch.com"
+DEFAULT_API_HOST_FILES = {"app.js"}
 HOST_RE = re.compile(r"https?://([A-Za-z0-9._-]+)")
 EXISTING_PHONE = "13700137000"
 PASSWORD = "secret-value"
@@ -150,8 +154,11 @@ def run():
                 errors.append(f"{name} missing; host scan skipped")
                 continue
             for host in HOST_RE.findall(source_path.read_text(encoding="utf-8")):
-                if host not in ALLOWED_HOSTS:
-                    leaks.append(f"{name} references external host '{host}'")
+                if host in ALLOWED_HOSTS:
+                    continue
+                if host == DEFAULT_API_HOST and name in DEFAULT_API_HOST_FILES:
+                    continue
+                leaks.append(f"{name} references external host '{host}'")
         if leaks:
             errors.extend(leaks)
         else:
@@ -185,6 +192,21 @@ def run():
             errors.append("Username input is prefilled")
         else:
             print("[OK] Username input not prefilled")
+
+        # Test 6b: 没有历史记录的浏览器里，服务地址预填默认值。
+        # 必须开独立 context 才能拿到空 localStorage——同 context 下前面
+        # 连接成功的地址会盖过默认值，断言就测不到默认值本身了。
+        fresh_context = browser.new_context(viewport={"width": 1280, "height": 900})
+        fresh_page = fresh_context.new_page()
+        fresh_page.goto(FILE_URL)
+        fresh_page.wait_for_load_state("networkidle")
+        fresh_page.wait_for_timeout(300)
+        prefilled = fresh_page.locator("#apiBaseInput").input_value()
+        if prefilled != DEFAULT_API_BASE:
+            errors.append(f"Service address not prefilled with the default: {prefilled!r}")
+        else:
+            print(f"[OK] Service address prefilled with the default: {prefilled}")
+        fresh_context.close()
 
         # Test 7: CSV 解析与本地校验
         page.set_input_files("#fileInput", csv_upload("fixture.csv", FIXTURE_CSV))

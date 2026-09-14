@@ -1,6 +1,8 @@
 "use strict";
 
 const API_BASE_STORAGE_KEY = "training-cert-batch-fill.apiBase";
+// 预填常用服务地址，省去每次手输。地址公开不构成风险：调用接口仍需账号密码换取临时令牌。
+const DEFAULT_API_BASE = "https://z.fibrotouch.com:3962";
 const TOKEN_RENEW_AFTER_MS = 75_000;
 const MAX_PREVIEW_ROWS = 200;
 const PHONE_RE = /^1[3-9]\d{9}$/;
@@ -289,9 +291,9 @@ function normalizeHeader(value) {
 
 function readStoredApiBase() {
   try {
-    return window.localStorage.getItem(API_BASE_STORAGE_KEY) || "";
+    return window.localStorage.getItem(API_BASE_STORAGE_KEY) || DEFAULT_API_BASE;
   } catch {
-    return "";
+    return DEFAULT_API_BASE;
   }
 }
 
