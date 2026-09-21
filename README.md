@@ -62,8 +62,8 @@ node tests/lint_te_cert_cloud.js
 
 | 服务商 | 状态 | 说明 |
 |---|---|---|
-| **ConvertAPI** | ✅ 已端到端验证 | 推荐首选。单次 POST、Bearer 头，250 次/月 |
-| Adobe PDF Services | ⚠️ 已实现，未跑通 | 令牌与各步请求头已对齐官方文档，但完整流程未经真实凭据验证 |
+| **ConvertAPI** | ✅ 已端到端验证 | 单次 POST、Bearer 头，约 250 次/月 |
+| **Adobe PDF Services** | ✅ 已端到端验证 | 500 份/月（额度最宽），但需走 Adobe 的凭据创建流程 |
 | CloudConvert | ⚠️ 已实现，未验证 | 下载地址是服务端返回的动态 URL，可能受 CSP 白名单影响 |
 
 #### 用之前先看

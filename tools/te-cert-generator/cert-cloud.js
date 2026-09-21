@@ -471,25 +471,34 @@
    * Adobe PDF Services：换 access_token → 建 asset → 上传 S3 → 建 job → 轮询 → 下载。
    * 免费档 500 Document Transaction/月（1 事务 = 1 份文档，最多 50 页），额度最宽。
    *
-   * ⚠ 令牌端点必须用 `https://pdf-services.adobe.io/token`，不是 Adobe IMS。
+   * ✅ 已用真实凭据端到端验证通过（2026-09）。下面三条是走通之前踩过的坑，
+   *    改动这个适配器前请先读完 —— 每一条都会让整条链路失败。
+   *
+   * ⚠ 1) 令牌端点必须用 https://pdf-services.adobe.io/token，不是 Adobe IMS。
    *   踩过的坑：一开始照搬通用 Adobe IMS 凭据流程用了
    *     https://ims-na1.adobelogin.com/ims/token/v3
-   *   结果一律返回 400 invalid_client —— **端点本身就错了**。
-   *   PDF Services 有独立的换令牌端点，且**不需要 grant_type**，只要这两个字段：
+   *   结果一律返回 400 invalid_client —— 端点本身就错了。
+   *   PDF Services 有独立的换令牌端点，且不需要 grant_type，只要这两个字段：
    *
    *     POST https://pdf-services.adobe.io/token
    *     Content-Type: application/x-www-form-urlencoded
    *     client_id=<Client ID>&client_secret=<Client Secret>
    *
    *   实测对比（假凭据，2026-09）：
-   *     ims-na1…/ims/token/v3  → 400，且**不带** Access-Control-Allow-Origin
+   *     ims-na1…/ims/token/v3  → 400，且不带 Access-Control-Allow-Origin
    *                              （浏览器把它报成 CORS 失败，把 invalid_client 盖掉）
-   *     pdf-services…/token    → 400，**带 ACAO: ***，错误信息能正常读到
-   *   预检也确认放行 Authorization / Content-Type / X-Api-Key。
+   *     pdf-services…/token    → 400，带 ACAO: *，错误信息能正常读到
    *
-   * 上传与下载都是直连 Adobe 的 S3 预签名地址，所以 CSP 的 connect-src 必须放行
-   * dcplatformstorageservice-prod-us-east-1.s3-accelerate.amazonaws.com（美国区）
-   * 和 dcplatformstorageservice-prod-eu-west-1.s3.amazonaws.com（欧洲区）。
+   * ⚠ 2) 不要给请求加自定义头。浏览器对非简单请求头会先发预检，预检没过就直接拦掉、
+   *   请求到不了服务端。实测 /operation/createpdf 允许的头只有
+   *     Authorization, Content-Type, X-Api-Key, User-Agent, If-Modified-Since, x-api-app-info
+   *   曾因加了个 x-request-id 而报「not allowed by Access-Control-Allow-Headers」。
+   *   注意：Node 的 fetch 不做预检，这类问题在 Node 侧永远测不出来。
+   *
+   * ⚠ 3) 上传与下载都是直连 Adobe 的 S3 预签名地址，CSP 的 connect-src 必须放行
+   *   dcplatformstorageservice-prod-us-east-1.s3-accelerate.amazonaws.com（美国区）
+   *   和 dcplatformstorageservice-prod-eu-west-1.s3.amazonaws.com（欧洲区）。
+   *   （已实测两区预检均返回 ACAO: * 且允许 PUT。）
    *
    * Client Secret 会出现在前端，请用专门为此申请的应用凭据，不要复用其它系统的密钥。
    */
