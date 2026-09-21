@@ -1,0 +1,292 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="description"
+      content="输入姓名、医院和日期，在浏览器本地批量生成 TE 操作培训证书，打包 ZIP 下载。"
+    />
+    <!--
+      CSP 说明：
+      - img-src 放行 blob: —— 证书背景图若走 URL.createObjectURL(new Blob([...]))，
+        得到的是 blob: 地址，只写 data: 不够（漏掉会让背景图被静默拦掉，页面上只剩文字）。
+      - connect-src 放行 file: —— 本工具要读同目录下的 docx 模板；
+        file:// 页面的 origin 是不透明的 null，'self' 匹配不上。
+      - connect-src 还放行三个云转换服务 —— 用户显式选择服务商后，浏览器直连它们
+        把 DOCX 转成 PDF。不选服务商时不会发出任何请求。这些域名是白名单写死的，
+        不接受任意地址，避免变成通用外发通道。
+      - Adobe 的两条 S3 主机必不可少：它的资产上传与成品下载都是直连 S3 预签名地址
+        （dcplatformstorageservice-prod-*.s3*.amazonaws.com），漏掉会让上传阶段失败。
+        令牌走 pdf-services.adobe.io/token，不再需要 ims-na1.adobelogin.com。
+      - script-src 保持 'self' —— 脚本只从本目录加载，包括本机首选的 base64 模板载荷。
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self' file: https://v2.convertapi.com https://api.cloudconvert.com https://pdf-services.adobe.io https://pdf-services-ue1.adobe.io https://dcplatformstorageservice-prod-us-east-1.s3-accelerate.amazonaws.com https://dcplatformstorageservice-prod-eu-west-1.s3.amazonaws.com; object-src 'none'; base-uri 'self'; form-action 'self'"
+    />
+    <title>TE 培训证书批量生成</title>
+    <link
+      rel="icon"
+      type="image/svg+xml"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%231f1140'/%3E%3Crect x='16' y='12' width='32' height='40' rx='3' fill='none' stroke='%23a78bfa' stroke-width='4'/%3E%3Cpath d='M23 24h18M23 32h18M23 40h11' stroke='%23a78bfa' stroke-width='3.5' stroke-linecap='round'/%3E%3Ccircle cx='44' cy='49' r='7' fill='%23fbbf24'/%3E%3C/svg%3E"
+    />
+    <link rel="stylesheet" href="./styles.css" />
+    <script defer src="./xlsx.full.min.js"></script>
+    <script defer src="./cert-core.js"></script>
+    <script defer src="./cert-cloud.js"></script>
+    <!--
+      cert-merge.js 刻意不在此加载：它只在「逐份转换的 PDF 需要合并」时才用得上，
+      而主路径是「N 份拼成一份多页 DOCX → 一次请求换回一份多页 PDF」，不需要合并。
+      保留文件是因为合批失败会自动退回逐份，那时若想再合成一本就得用它 —— 但那是
+      尚未实现的功能，所以不加载、也不假装可用（加载它只是白费 10KB）。
+    -->
+    <script defer src="./app.js"></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#workspace">跳到生成工作区</a>
+
+    <header class="masthead">
+      <div class="brand-mark" aria-hidden="true">证</div>
+      <div class="brand-copy">
+        <a class="back-link" href="../../index.html">&#x2190; 返回工具箱</a>
+        <p class="eyebrow">CERTIFICATE FORGE · LOCAL</p>
+        <h1>TE 培训证书批量生成</h1>
+      </div>
+      <div class="privacy-badge" title="DOCX 在本机生成；PDF 转换需你显式选择云服务">
+        <span class="privacy-badge__dot" aria-hidden="true"></span>
+        本地生成 · PDF 需自选云服务
+      </div>
+    </header>
+
+    <main id="workspace" class="workspace">
+      <aside class="control-rail" aria-label="生成设置">
+        <section class="panel" aria-labelledby="input-heading">
+          <div class="panel-number" aria-hidden="true">01</div>
+          <div class="panel-heading">
+            <h2 id="input-heading">快速输入名单</h2>
+            <button id="clearInputBtn" class="text-button" type="button">清空输入</button>
+          </div>
+
+          <label class="field-label" for="quickInput">
+            <span>一行一条：多个姓名用顿号隔开，后面写医院名称和日期</span>
+          </label>
+          <textarea
+            id="quickInput"
+            class="quick-input"
+            rows="5"
+            spellcheck="false"
+            placeholder="靳睿、耿楠、芮法娟、倪文婧 南京鼓楼医院 25年10月10日"
+          ></textarea>
+
+          <p class="panel-note">
+            日期可写 25年10月10日 / 2025-10-10 / 2025.10.10。解析后每人一行，
+            姓名、医院、日期都能在右侧表格里直接改。快捷键 Ctrl + Enter 解析。
+          </p>
+
+          <div class="action-row">
+            <button id="parseBtn" class="button button--primary" type="button" disabled>
+              <span>解析到表格</span>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-5-5 5 5-5 5" /></svg>
+            </button>
+            <button id="insertSampleBtn" class="button button--ghost" type="button">插入示例</button>
+          </div>
+
+          <details class="import-block">
+            <summary>名单已经在 CSV / Excel 里？改用文件导入</summary>
+            <label id="fileDropLabel" class="drop-zone" for="fileInput" tabindex="0">
+              <input id="fileInput" type="file" accept=".csv,.xlsx,.xls" />
+              <strong>选择或拖入文件</strong>
+              <span>支持 .csv / .xlsx / .xls，自动识别 UTF-8 与 GBK</span>
+            </label>
+            <div id="fileSummary" class="file-summary is-empty" aria-live="polite">
+              <span id="fileName">尚未选择文件</span>
+              <span id="fileMeta"></span>
+            </div>
+            <button id="downloadSampleBtn" class="text-button" type="button">下载示例 CSV</button>
+          </details>
+        </section>
+
+        <section class="panel" aria-labelledby="template-heading">
+          <div class="panel-number" aria-hidden="true">02</div>
+          <div class="panel-heading">
+            <h2 id="template-heading">证书模板</h2>
+          </div>
+          <div class="template-picker" role="radiogroup" aria-labelledby="template-heading">
+            <label class="template-option">
+              <input type="radio" name="template" value="general" checked />
+              <span class="template-option__body">
+                <b>一般版本</b>
+                <small>template-general.docx</small>
+              </span>
+            </label>
+            <label class="template-option">
+              <input type="radio" name="template" value="special" />
+              <span class="template-option__body">
+                <b>260513 特殊版本</b>
+                <small>template-special.docx</small>
+              </span>
+            </label>
+          </div>
+        </section>
+
+        <section class="panel" aria-labelledby="action-heading">
+          <div class="panel-number" aria-hidden="true">03</div>
+          <div class="panel-heading">
+            <h2 id="action-heading">生成与下载</h2>
+          </div>
+          <div class="action-stack">
+            <button id="generateBtn" class="button button--primary" type="button" disabled>
+              <span>生成 ZIP（DOCX）</span>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 19h14" /></svg>
+            </button>
+            <button id="downloadSelectedBtn" class="button button--ghost" type="button" disabled>
+              只下载勾选的 <span id="selectedCount">0</span> 条
+            </button>
+            <button id="clearAllBtn" class="button button--ghost" type="button" disabled>
+              清空表格
+            </button>
+          </div>
+          <p class="panel-note">
+            ZIP 里是每人的 .docx 证书，本地生成、零网络，需要二次编辑时用这个。
+          </p>
+
+          <div class="cloud-block">
+            <h3 class="cloud-title">PDF 转换（可选）</h3>
+            <p class="panel-note">
+              DOCX 是本机生成的；要 PDF 就得有人做排版，浏览器做不好这件事，
+              所以交给云服务。选好服务商并填密钥后，点下面的按钮一次拿到多页 PDF。
+            </p>
+
+            <label class="field-label" for="cloudProvider">转换服务</label>
+            <select id="cloudProvider" class="cloud-select"></select>
+
+            <div id="cloudFields" class="cloud-fields"></div>
+            <p id="cloudHelp" class="cloud-help"></p>
+
+            <div class="action-row">
+              <button id="cloudSaveBtn" class="button button--ghost button--small" type="button" disabled>
+                记住密钥（仅本机）
+              </button>
+              <button id="cloudForgetBtn" class="button button--ghost button--small" type="button" disabled>
+                清除密钥
+              </button>
+            </div>
+
+            <button id="pdfBtn" class="button button--secondary" type="button" disabled>
+              <span>转换并下载 PDF</span>
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 19h14" /></svg>
+            </button>
+
+            <p id="cloudNote" class="cloud-note">
+              默认不联网。姓名、医院、日期只在本机浏览器里处理。
+            </p>
+          </div>
+          <div id="progressBlock" class="progress-block" hidden>
+            <div class="progress-copy">
+              <span id="progressText">准备中</span>
+              <strong id="progressPercent">0%</strong>
+            </div>
+            <div class="progress-track" aria-hidden="true">
+              <span id="progressBar"></span>
+            </div>
+          </div>
+        </section>
+      </aside>
+
+      <section class="data-stage" aria-labelledby="preview-heading">
+        <div class="stage-header">
+          <div>
+            <p class="eyebrow">EDIT &amp; VERIFY</p>
+            <h2 id="preview-heading">名单表格</h2>
+          </div>
+          <div class="stage-actions">
+            <label class="filter-label" for="statusFilter">
+              <span>显示</span>
+              <select id="statusFilter">
+                <option value="all">全部记录</option>
+                <option value="problem">仅需处理的</option>
+                <option value="ready">仅可生成的</option>
+                <option value="duplicate">仅同名重复</option>
+              </select>
+            </label>
+          </div>
+        </div>
+
+        <div class="stats-grid" aria-label="名单统计">
+          <article class="stat-card">
+            <span>证书条数</span><strong id="statTotal">0</strong><small>ROWS</small>
+          </article>
+          <article class="stat-card is-ready">
+            <span>可生成</span><strong id="statReady">0</strong><small>READY</small>
+          </article>
+          <article class="stat-card is-problem">
+            <span>需处理</span><strong id="statProblem">0</strong><small>CHECK</small>
+          </article>
+          <article class="stat-card is-duplicate">
+            <span>同名重复</span><strong id="statDuplicate">0</strong><small>DUP</small>
+          </article>
+        </div>
+
+        <div id="noticeBar" class="notice-bar" role="status" aria-live="polite">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v5m0 3h.01M10.3 3.9 2.6 17.2A2 2 0 0 0 4.3 20h15.4a2 2 0 0 0 1.7-2.8L13.7 3.9a2 2 0 0 0-3.4 0Z" /></svg>
+          <span>在左侧输入姓名、医院和日期，点「解析到表格」后即可逐条修改。DOCX 全程在本机生成；只有你选了 PDF 转换服务后，证书内容才会发送给该服务。</span>
+        </div>
+
+        <div id="emptyState" class="empty-state">
+          <div class="empty-state__graphic" aria-hidden="true">
+            <span></span><span></span><span></span><span></span>
+          </div>
+          <h3>等待名单</h3>
+          <p>
+            示例：<code>靳睿、耿楠、芮法娟、倪文婧 南京鼓楼医院 25年10月10日</code><br />
+            解析后每位学员一行，姓名、医院、日期都可在表格里直接改。
+          </p>
+        </div>
+
+        <div id="tableRegion" class="table-region" hidden>
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col" class="col-pick">
+                    <input id="selectAll" type="checkbox" aria-label="全选可生成记录" />
+                  </th>
+                  <th scope="col" class="col-line">#</th>
+                  <th scope="col">姓名</th>
+                  <th scope="col">医院名称</th>
+                  <th scope="col">颁发日期</th>
+                  <th scope="col">输出文件名</th>
+                  <th scope="col">状态</th>
+                  <th scope="col" class="col-actions">操作</th>
+                </tr>
+              </thead>
+              <tbody id="previewBody"></tbody>
+            </table>
+          </div>
+          <div class="table-footer">
+            <p id="tableFootnote" class="table-footnote"></p>
+            <button id="addRowBtn" class="button button--ghost button--small" type="button">
+              + 新增一行
+            </button>
+          </div>
+        </div>
+
+        <section id="activityPanel" class="activity-panel" aria-labelledby="activity-heading" hidden>
+          <div class="activity-heading">
+            <h3 id="activity-heading">生成记录</h3>
+            <span id="activityClock"></span>
+          </div>
+          <ol id="activityLog" aria-live="polite"></ol>
+        </section>
+      </section>
+    </main>
+
+    <footer>
+      <span>STATIC CLIENT / DOCX 直接填充 word/document.xml，无后端</span>
+      <span>PDF 由你选择的云服务转换，密钥只存本机</span>
+    </footer>
+
+    <div id="toastRegion" class="toast-region" aria-live="assertive" aria-atomic="true"></div>
+  </body>
+</html>

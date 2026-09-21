@@ -15,19 +15,70 @@ toolbox/
 │   │   └── index.html
 │   ├── tax-calc/           # 税点计算器
 │   │   └── index.html
-│   └── training-cert-batch-fill/   # 操作培训证书批量填充
+│   ├── training-cert-batch-fill/   # 操作培训证书批量填充
+│   │   ├── index.html
+│   │   ├── app.js
+│   │   ├── styles.css
+│   │   └── xlsx.full.min.js
+│   └── te-cert-generator/  # TE 培训证书批量生成
 │       ├── index.html
 │       ├── app.js
+│       ├── cert-core.js            # 模板填充、ZIP、日期解析（无网络）
+│       ├── cert-cloud.js           # 云端 DOCX→PDF 适配层（浏览器直连）
+│       ├── cert-merge.js           # 多页 DOCX 拼装 + PDF 合并
 │       ├── styles.css
+│       ├── build-templates.js      # docx → base64 载荷（改了 docx 必须重跑）
+│       ├── template-*.docx         # 证书模板
+│       ├── template-*.b64.js       # 模板载荷（file:// 下靠它读模板）
 │       └── xlsx.full.min.js
-└── tests/                  # 测试文件（Playwright e2e）
+└── tests/                  # 测试文件
     ├── screenshots/        # 测试截图（gitignore）
     ├── test_lung_marker.py
     ├── test_rmb_upper.py
     ├── test_tax_calc.py
     ├── test_toolbox.py
-    └── test_training_cert_batch_fill.py
+    ├── test_training_cert_batch_fill.py
+    ├── test_te_cert_cloud_core.js        # 证书工具核心逻辑（纯 Node）
+    └── lint_te_cert_cloud.js             # 证书工具接线检查（纯 Node）
 ```
+
+### te-cert-generator 的五条硬约束
+
+改这个工具前先读这五条，都是踩过的坑：
+
+1. **模板改了必须重跑载荷**：`node tools/te-cert-generator/build-templates.js`。
+   `file://` 下 Chromium 拒绝 fetch 同目录的 docx，模板只能靠 base64 载荷用
+   `<script src>` 加载。忘了重跑会用旧模板静默生成证书，`lint_te_cert_cloud.js`
+   会逐字节比对拦下这种情况。
+2. **CSP 里的 `connect-src` 是白名单**：云转换的三个服务商域名写死在这里，
+   不是通配 `https:`。新增服务商要同时改 `cert-cloud.js` 的端点和 `index.html`
+   的 CSP，linter 会核对两边是否一致。
+3. **不能说"不上传"**：DOCX 全程本地，但 PDF 转换会把证书内容发给用户选定的
+   云服务。页面文案必须讲清楚这一点，默认值必须是"不转换"。
+4. **Adobe PDF Services 必须用它的专属令牌端点**（照搬通用 Adobe IMS 会一直 400）：
+
+   ```
+   POST https://pdf-services.adobe.io/token      ← 不是 ims-na1.adobelogin.com/ims/token/v3
+   Content-Type: application/x-www-form-urlencoded
+   client_id=<Client ID>&client_secret=<Client Secret>   ← 没有 grant_type
+   ```
+
+   两者的差别不只是端点：IMS 出错时**不带** `Access-Control-Allow-Origin`，浏览器
+   会把 400 报成"没有 CORS 头"，把真正原因盖掉；专属端点出错时带 `ACAO: *`，能读到
+   错误正文。另外 Adobe 的资产上传与成品下载都是直连 S3 预签名地址，CSP 必须放行
+   `dcplatformstorageservice-prod-us-east-1.s3-accelerate.amazonaws.com`（美国区）
+   和 `dcplatformstorageservice-prod-eu-west-1.s3.amazonaws.com`（欧洲区）。
+5. **合批必须显式插分页符**：每份证书靠 `<w:p>` 分隔，但背景图是 `<wp:anchor>`
+   浮动对象、不贡献段落高度，所以不能指望它撑页。实测 15 份合批被引擎全排进
+   一页。要在第二份起每份前面插入 `<w:p><w:r><w:br w:type="page"/></w:r></w:p>`。
+6. **不要给 Adobe 的请求加自定义头**（除了 `Authorization` / `Content-Type` / `X-Api-Key`）。
+   浏览器对任何非简单请求头都会先发预检，预检没过就直接拦掉、请求到不了服务端。
+   实测 `createpdf` 端点允许的头只有 `Authorization, Content-Type, X-Api-Key,
+   User-Agent, If-Modified-Since, x-api-app-info` —— 加个看起来很无害的
+   `x-request-id` 就会报 "Request header field … is not allowed by
+   Access-Control-Allow-Headers"。**Node 的 fetch 不做预检，所以这类问题在 Node 侧
+   探测和单元测试里全都看不见**；`lint_te_cert_cloud.js` 有一条专门核对它。
+
 
 ## 文件组织规则（必须遵守）
 
