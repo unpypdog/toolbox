@@ -11,8 +11,3 @@ wheels/
 
 # Test artifacts
 *.png
-
-# 证书 PDF 基准测试的临时产物（字体变体、合批样本、对比测量输出）
-# 属于一次性的验证材料，不是工具的一部分；需要时重跑脚本即可再生成。
-# 生成方式见 .baseline/README.md
-.baseline/
