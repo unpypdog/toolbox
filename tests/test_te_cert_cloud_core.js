@@ -402,9 +402,8 @@ function testAiExtraction() {
     typeof imgBody.messages[0].content === "string",
   );
 
-  // ---- 图片 + 文字混合：最常见的真实用法是「图片放名单、文字写医院和日期」----
-  // 提示词不把合并规则讲清楚，模型会把它当成两批人，产出一堆重复记录或
-  // 把「南京鼓楼医院」当成一个人名。这些断言就是钉这条规则的。
+  // ---- 图片 + 文字混合：图片给姓名，文字按整批 / 分组 / 个人补医院和日期 ----
+  // 不能再把文字里的某一个值无条件套给所有人；多个医院/日期必须逐人或逐组匹配。
   console.log("  --- 图 + 文混合（合并成同一个名单）---");
   const mixed = ai.buildRequestBody({
     text: "这几个人是南京鼓楼医院的，日期 2025年10月10日",
@@ -432,9 +431,46 @@ function testAiExtraction() {
   );
 
   check(
-    "system 提示词说明了医院/日期要套用到每一位",
-    /套用/.test(ai.PROMPT),
-    "缺这条规则，模型会把医院名当成独立记录或只给第一个人",
+    "system 提示词要求医院/日期逐人或逐组匹配",
+    /按人|逐人/.test(ai.PROMPT) && /按组|分组/.test(ai.PROMPT),
+    "多个医院/日期不能再按整批一刀切",
+  );
+  check(
+    "system 提示词要求完整提取图片每行的姓名/医院/日期",
+    /逐行读取 name、hospital、date/.test(ai.PROMPT) &&
+      /不能因为常见图片只有姓名而忽略/.test(ai.PROMPT),
+    "图片可能本身就是完整表格，不能只读姓名",
+  );
+  check(
+    "user 消息要求先建立完整图片基础表格",
+    /逐行提取图片中的姓名、医院和日期/.test(mixedText) && /基础表格/.test(mixedText),
+    mixedText.slice(-240),
+  );
+  check(
+    "system 提示词禁止多个值中的一个覆盖全表",
+    /不能任选一个值[\s\S]{0,12}覆盖全表|绝不能任选一个覆盖所有人/.test(ai.PROMPT),
+    "缺这条规则时模型容易只保留最后一个日期",
+  );
+  check(
+    "旧的整批共用规则已移除",
+    !/医院名称\/日期是\*\*整批人共用的\*\*/.test(ai.PROMPT) &&
+      !/医院名称与日期套用到图片里的每一位/.test(mixedText),
+    "这两句会把局部医院/日期错误扩大到所有人",
+  );
+  check(
+    "只有唯一且无分组迹象的字段才能全局套用",
+    /恰好只有一个[\s\S]{0,30}没有任何按人\/按组区分/.test(ai.PROMPT),
+    "单值可以作为默认值，多值必须判断归属",
+  );
+  check(
+    "医院与日期分别判断作用域",
+    /医院和日期要分别判断/.test(ai.PROMPT),
+    "医院可能全局相同，但日期仍可能按组不同",
+  );
+  check(
+    "多值归属不清时留空并标注",
+    /多个候选值但归属不清[\s\S]{0,120}保留图片原值[\s\S]{0,80}留空[\s\S]{0,30}note/.test(ai.PROMPT),
+    "已有图片值要保留；两边都没有才留空",
   );
   check(
     "system 提示词禁止把医院/日期单独生成记录",
@@ -442,21 +478,79 @@ function testAiExtraction() {
     ai.PROMPT.slice(ai.PROMPT.indexOf("绝对不要") - 20, ai.PROMPT.indexOf("绝对不要") + 60),
   );
   check(
-    "system 提示词给了「图片姓名 + 文字医院日期」的示例",
-    /示例二/.test(ai.PROMPT) && /3 条记录/.test(ai.PROMPT),
+    "system 提示词同时给了完整图片、局部修正、分组与歧义示例",
+    /示例三/.test(ai.PROMPT) && /示例四/.test(ai.PROMPT) &&
+      /示例五/.test(ai.PROMPT) && /示例六/.test(ai.PROMPT),
   );
   check(
-    "system 提示词要求姓名以图片为主要来源",
-    // 提示词里用 markdown 粗体标注了关键词（**图片**），正则要容下那对星号
-    /姓名以\**图片\**为(主要)?来源/.test(ai.PROMPT),
-    ai.PROMPT.slice(ai.PROMPT.indexOf("姓名以"), ai.PROMPT.indexOf("姓名以") + 40),
+    "system 提示词以图片人员行为合并锚点并允许文字明确纠错",
+    /图片中的人员行是合并锚点/.test(ai.PROMPT) &&
+      /文字可以明确纠正某个人的姓名/.test(ai.PROMPT) &&
+      /同一个人不能因此变成两条/.test(ai.PROMPT),
+    "图片提供基础行，但文字应能纠正明确的 OCR 姓名错误",
   );
   check(
-    "system 提示词要求医院/日期以文字为准",
-    // 措辞从"以文字为主要来源"升级成了更强的"优先级最高、无条件覆盖"——
-    // 因为"主要来源"留了余地，模型会去比较两个日期、取年份更小的那个（真踩过）
-    /优先级[\s\S]{0,10}最高/.test(ai.PROMPT) && /无条件覆盖/.test(ai.PROMPT),
-    ai.PROMPT.slice(ai.PROMPT.indexOf("谁说了算"), ai.PROMPT.indexOf("谁说了算") + 60),
+    "user 消息要求逐人匹配且禁止覆盖所有人",
+    /逐人匹配/.test(mixedText) && /绝不能任选一个覆盖所有人/.test(mixedText),
+    mixedText.slice(-180),
+  );
+
+  // ---- 合并流程本身：维护一张带 source 列的数据表，按四步推进 ----
+  // 这一组钉的是「流程结构」，而不是某句效果描述。之前那版是一串并列规则，
+  // 模型容易跳步、把文字里的值直接套给全表；改成显式的数据表流程后，
+  // 下面的断言保证后来者不会把结构化流程又拆回一堆散规则。
+  console.log("  --- 合并流程：数据表 + 四步 ---");
+  const stepAt = (n) => ai.PROMPT.indexOf(`第 ${n} 步`);
+  check(
+    "提示词要求维护一张数据表",
+    /维护一张.*数据表/.test(ai.PROMPT),
+    "没有统一的表，图片和文字就会各解析一遍然后并列输出",
+  );
+  check(
+    "数据表有 source 列，标明每行来自图片还是文字",
+    /source/.test(ai.PROMPT) && /来源（图片 \/ 文字）/.test(ai.PROMPT),
+    "source 是后来者追溯某行数据出处、以及判断覆盖方向的依据",
+  );
+  check(
+    "四个步骤按顺序出现，没有跳步",
+    stepAt(1) > 0 && stepAt(1) < stepAt(2) && stepAt(2) < stepAt(3) && stepAt(3) < stepAt(4) &&
+      stepAt(4) > 0,
+    [stepAt(1), stepAt(2), stepAt(3), stepAt(4)].join(", "),
+  );
+  check(
+    "第 1 步要求先看清表格结构，不预设图片只有姓名",
+    /先看清表格结构/.test(ai.PROMPT) && /不要预设图片只有姓名/.test(ai.PROMPT),
+    "图片可能就是完整表格，预设只有姓名会直接丢掉两列数据",
+  );
+  check(
+    "第 2 步是解析图片并填充数据表",
+    /解析图片，填充数据表/.test(ai.PROMPT) && /逐行读取/.test(ai.PROMPT),
+  );
+  check(
+    "第 3 步是解析文字并补充到对应行",
+    /解析文字/.test(ai.PROMPT) && /补充到对应行/.test(ai.PROMPT),
+    "文字是往已有行里补字段，不是重新建一张表",
+  );
+  check(
+    "第 4 步要求以填好的表为准输出，不许再凭印象补字段",
+    /对完整数据表做分析/.test(ai.PROMPT) &&
+      /不要在输出阶段再凭印象补字段或改变某行的归属/.test(ai.PROMPT),
+    "输出阶段再自由发挥，等于绕过前面三步的匹配结果",
+  );
+  check(
+    "内部数据表不得出现在输出的 json 里",
+    /数据表是你内部的推理过程/.test(ai.PROMPT) && /不要.*把它打印在 json 里/.test(ai.PROMPT),
+    "输出形状一旦多一个 table 字段，extractRecords 就取不到 records",
+  );
+  check(
+    "records 行数必须与数据表一致",
+    /records 的长度与数据表的行数一致/.test(ai.PROMPT),
+    "表里有几行就该出几条证书，不能多也不能少",
+  );
+  check(
+    "user 消息也指向同一套四步流程",
+    /四步流程/.test(mixedText) && /维护那张数据表/.test(mixedText),
+    mixedText.slice(-200),
   );
 
   // 只有图片时不应出现「文字」相关的措辞
@@ -511,26 +605,33 @@ function testAiExtraction() {
     "示例 json 不能被改成解析不了的形态，否则模型学不到格式",
   );
 
-  // ---- 优先级：文字 > 图片。这条比"少抽一个人"更重要 ----
-  console.log("  --- 文字里的日期必须无条件覆盖图片 ---");
+  // ---- 优先级：先确定文字的适用人群，再以文字覆盖这些人的图片字段 ----
+  console.log("  --- 文字按作用域覆盖图片，不能把局部值扩大到全体 ---");
   check(
-    "提示词写明文字优先级最高",
-    /优先级[\s\S]{0,6}最高|无条件覆盖/.test(ai.PROMPT),
-    "只写「以文字为主要来源」不够 —— 模型会去比较两个日期、取年份更小的那个",
+    "提示词写明已匹配的文字信息优先于图片",
+    /已经匹配|匹配到[\s\S]{0,20}文字优先/.test(ai.PROMPT),
+    "必须先匹配归属，再谈文字优先级",
   );
   check(
-    "提示词要求忽略图片上印的日期",
-    /一律[\s\S]{0,4}忽略|不要[\s\S]{0,10}比较/.test(ai.PROMPT),
-    "模板/往期证书上常印着日期，不明确禁止就会被当成真数据",
+    "提示词区分人员行日期与图片背景日期",
+    /同一行\/同一列明确关联[\s\S]{0,20}正常提取/.test(ai.PROMPT) &&
+      /不属于任何人员数据行[\s\S]{0,10}才忽略/.test(ai.PROMPT),
+    "不能为了忽略模板日期而把表格里的真实日期也丢掉",
   );
   check(
-    "提示词明确不许在 note 里质疑文字里写死的字段",
-    /不算不确定|不要在 note 里质疑/.test(ai.PROMPT),
-    "否则每条都会挂一句「日期待核对」，用户没法分辨哪些真的需要核对",
+    "文字未涉及的图片字段必须保留",
+    /文字没有明确涉及的字段必须保留图片基础表格中的原值/.test(ai.PROMPT) &&
+      /文字未涉及的图片字段不变/.test(mixedText),
+    "局部修正不能清空其他人的完整图片数据",
   );
   check(
-    "user 消息里也重申了「文字为准、无条件覆盖」",
-    /无条件覆盖/.test(mixedText) || /以文字为准/.test(mixedText),
+    "提示词只信任明确绑定到个人或小组的文字字段",
+    /明确绑定到这个人或其小组/.test(ai.PROMPT),
+    "不能把未说明归属的文字值当作已确认",
+  );
+  check(
+    "user 消息里也重申了多值不得全局覆盖",
+    /多个医院或多个日期/.test(mixedText) && /覆盖所有人/.test(mixedText),
     mixedText.slice(-80),
   );
 

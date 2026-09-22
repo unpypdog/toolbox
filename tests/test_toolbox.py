@@ -5,6 +5,24 @@ from playwright.sync_api import sync_playwright
 PROJECT_ROOT = Path(__file__).parent.parent
 FILE_URL = f"file:///{PROJECT_ROOT / 'index.html'}"
 
+# 首页工具卡片数量。新增工具时必须同步这里 —— 之前这个数字写死在四个断言里，
+# 加了 te-cert-generator 之后没人改，导致这套测试从那时起一直是红的。
+EXPECTED_TOOL_CARDS = 5
+
+
+def check_card_count(page, errors, where):
+    """断言回到了首页：卡片数量就是「首页是否真的渲染出来」的可靠信号。
+
+    数量对不上时把上下文一起报出来，否则三条断言只会重复同一句话，
+    看不出是哪一步的导航坏了。
+    """
+    count = page.locator(".tool-card").count()
+    if count != EXPECTED_TOOL_CARDS:
+        errors.append(f"{where}: expected {EXPECTED_TOOL_CARDS} tool cards, got {count}")
+        return False
+    print(f"[OK] {where}: {count} tool cards")
+    return True
+
 
 def run():
     with sync_playwright() as p:
@@ -27,11 +45,11 @@ def run():
         else:
             print(f"[OK] Page title: {title}")
 
-        # Test 2: Four tool cards exist
+        # Test 2: All tool cards exist
         cards = page.locator(".tool-card")
         card_count = cards.count()
-        if card_count != 4:
-            errors.append(f"Expected 4 tool cards, got {card_count}")
+        if card_count != EXPECTED_TOOL_CARDS:
+            errors.append(f"Expected {EXPECTED_TOOL_CARDS} tool cards, got {card_count}")
         else:
             print(f"[OK] {card_count} tool cards found")
 
@@ -63,6 +81,15 @@ def run():
         else:
             print(f"[OK] Card 3 → tools/training-cert-batch-fill/index.html")
 
+        # Test 5c: Fifth card links to the TE certificate generator
+        fifth_link = cards.nth(4).get_attribute("href")
+        if fifth_link != "./tools/te-cert-generator/index.html":
+            errors.append(
+                f"Card 4: expected href './tools/te-cert-generator/index.html', got '{fifth_link}'"
+            )
+        else:
+            print("[OK] Card 4 → tools/te-cert-generator/index.html")
+
         # Test 6: Navigate to lung marker and back
         cards.nth(0).click()
         page.wait_for_load_state("networkidle")
@@ -81,10 +108,7 @@ def run():
         page.wait_for_load_state("networkidle")
         page.wait_for_timeout(300)
         cards2 = page.locator(".tool-card")
-        if cards2.count() != 4:
-            errors.append("Back navigation to homepage failed")
-        else:
-            print("[OK] Back navigation to homepage works")
+        check_card_count(page, errors, "Back navigation to homepage")
 
         # Test 7: Navigate to tax calc and back via back link
         cards2.nth(1).click()
@@ -98,10 +122,7 @@ def run():
         back_link.click()
         page.wait_for_load_state("networkidle")
         page.wait_for_timeout(300)
-        if page.locator(".tool-card").count() != 4:
-            errors.append("Back link to homepage failed")
-        else:
-            print("[OK] Back link returns to homepage")
+        check_card_count(page, errors, "Back link from tax calc")
 
         # Test 8: Navigate to RMB converter and back
         cards3 = page.locator(".tool-card")
@@ -116,10 +137,7 @@ def run():
         back_link2.click()
         page.wait_for_load_state("networkidle")
         page.wait_for_timeout(300)
-        if page.locator(".tool-card").count() != 4:
-            errors.append("Back link from RMB converter to homepage failed")
-        else:
-            print("[OK] Full navigation cycle works")
+        check_card_count(page, errors, "Back link from RMB converter")
 
         if errors:
             print(f"\n=== {len(errors)} ERROR(S) ===")
