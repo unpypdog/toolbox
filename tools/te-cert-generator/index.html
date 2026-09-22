@@ -211,6 +211,48 @@
             <div id="cloudFields" class="cloud-fields"></div>
             <p id="cloudHelp" class="cloud-help"></p>
 
+            <details id="namingDetails" class="naming-block">
+              <summary>
+                <span>
+                  <b>文件命名</b>
+                  <small>可自定义；格式始终固定为 PDF</small>
+                </span>
+              </summary>
+              <div class="naming-grid">
+                <label class="naming-field" for="pdfNamePattern">
+                  <span>每人一个 PDF</span>
+                  <span class="filename-control">
+                    <input id="pdfNamePattern" type="text" autocomplete="off" spellcheck="false"
+                      value="TE操作培训证书_{姓名}" />
+                    <code>.pdf</code>
+                  </span>
+                </label>
+                <label class="naming-field" for="mergedNamePattern">
+                  <span>合并 PDF</span>
+                  <span class="filename-control">
+                    <input id="mergedNamePattern" type="text" autocomplete="off" spellcheck="false"
+                      value="TE操作培训证书_{份数}份_{时间}" />
+                    <code>.pdf</code>
+                  </span>
+                </label>
+                <label class="naming-field" for="zipNamePattern">
+                  <span>多个 PDF 的压缩包</span>
+                  <span class="filename-control">
+                    <input id="zipNamePattern" type="text" autocomplete="off" spellcheck="false"
+                      value="TE操作培训证书_{时间}" />
+                    <code>.zip</code>
+                  </span>
+                </label>
+              </div>
+              <p class="naming-tokens">
+                单份可用：<code>{姓名}</code> <code>{医院}</code> <code>{日期}</code> <code>{序号}</code>；
+                合并与压缩包可用：<code>{份数}</code> <code>{时间}</code>。
+                表格里的单个输出文件名也可以直接修改。
+              </p>
+              <p id="namingPreview" class="naming-preview" aria-live="polite"></p>
+              <button id="namingResetBtn" class="text-button" type="button">恢复默认命名</button>
+            </details>
+
             <label class="merge-toggle" for="pdfMergeToggle">
               <input id="pdfMergeToggle" type="checkbox" />
               <span>

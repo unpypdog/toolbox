@@ -1094,6 +1094,134 @@ footer {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
+/* 文件命名：默认收起，保留主流程的简洁；展开后集中处理三个交付层级 */
+.naming-block {
+  min-width: 0;
+  background: linear-gradient(135deg, rgba(109, 63, 240, 0.07), rgba(255, 255, 255, 0.7));
+  border: 1px solid rgba(109, 63, 240, 0.22);
+}
+
+.naming-block summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 11px 12px;
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+
+.naming-block summary::-webkit-details-marker {
+  display: none;
+}
+
+.naming-block summary::after {
+  content: "+";
+  flex: 0 0 auto;
+  font-size: 1.1rem;
+  line-height: 1;
+  color: var(--violet-deep);
+  transition: transform 0.2s ease;
+}
+
+.naming-block[open] summary::after {
+  transform: rotate(45deg);
+}
+
+.naming-block summary b,
+.naming-block summary small {
+  display: block;
+}
+
+.naming-block summary b {
+  font-size: 0.82rem;
+  color: var(--ink);
+}
+
+.naming-block summary small {
+  margin-top: 2px;
+  font-size: 0.7rem;
+  color: var(--ink-soft);
+}
+
+.naming-grid {
+  display: grid;
+  gap: 9px;
+  padding: 0 12px;
+}
+
+.naming-field {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  font-size: 0.74rem;
+  color: var(--ink-soft);
+}
+
+.filename-control {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-width: 0;
+  background: var(--paper-bright);
+  border: 1px solid var(--line-dark);
+}
+
+.filename-control:focus-within {
+  border-color: var(--violet-deep);
+  outline: 3px solid rgba(109, 63, 240, 0.18);
+}
+
+.filename-control input {
+  width: 100%;
+  min-width: 0;
+  padding: 8px 9px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.76rem;
+  color: var(--ink);
+  background: transparent;
+  border: 0;
+  outline: 0;
+}
+
+.filename-control code {
+  display: grid;
+  place-items: center;
+  padding: 0 9px;
+  font-size: 0.72rem;
+  color: var(--violet-deep);
+  background: rgba(109, 63, 240, 0.09);
+  border-left: 1px solid var(--line);
+}
+
+.naming-tokens,
+.naming-preview {
+  margin: 10px 12px 0;
+  font-size: 0.7rem;
+  line-height: 1.55;
+  color: var(--ink-soft);
+  overflow-wrap: anywhere;
+}
+
+.naming-tokens code {
+  color: var(--violet-deep);
+}
+
+.naming-preview {
+  padding: 8px 9px;
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.7);
+  border-left: 3px solid var(--violet-deep);
+}
+
+.naming-block > .text-button {
+  margin: 8px 8px 10px;
+}
+
+.col-file.is-editable {
+  color: var(--ink-soft);
+}
+
 /* ------------------------------------------------- AI 解析（图片输入与存疑备注） */
 
 /* AI 那块的拖放区比 CSV 导入的矮一些：图片只需要提示格式与体积 */

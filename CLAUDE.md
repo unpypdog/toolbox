@@ -5,7 +5,6 @@
 ```
 toolbox/
 ├── index.html              # 工具箱首页
-├── main.py                 # Python 入口（预留）
 ├── pyproject.toml          # 项目配置与依赖
 ├── uv.lock
 ├── tools/                  # 各个工具，每个工具一个独立文件夹

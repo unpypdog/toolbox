@@ -26,6 +26,9 @@ const CLOUD_STORE_KEY = "te-cert-cloud-credentials-v1";
 /** AI 解析设置的存放键（与服务商分开存，互不干扰） */
 const AI_STORE_KEY = "te-cert-ai-settings-v1";
 
+/** 输出命名偏好只含普通文本，单独存放；逐行覆盖不跨批次保存。 */
+const NAMING_STORE_KEY = "te-cert-output-naming-v1";
+
 /**
  * 当前页面是不是用 file:// 打开的。
  *
@@ -67,6 +70,12 @@ const state = {
   aiProvider: "",
   /** AI 解析设置：{ apiKey, model, endpoint } */
   aiSettings: {},
+  /** PDF/ZIP 命名模板；初始化时会用 CertCore 的默认值覆盖。 */
+  naming: {
+    individual: "TE操作培训证书_{姓名}",
+    merged: "TE操作培训证书_{份数}份_{时间}",
+    archive: "TE操作培训证书_{时间}",
+  },
   /** 待解析的图片：{ base64, mime, name } */
   aiImage: null,
   /** 让用户中途取消 AI 解析 */
@@ -91,6 +100,8 @@ document.addEventListener("DOMContentLoaded", () => {
     "selectAll", "activityPanel", "activityClock", "activityLog", "toastRegion",
     "cloudProvider", "cloudFields", "cloudHelp", "cloudNote", "cloudSaveBtn", "cloudForgetBtn",
     "pdfMergeToggle", "pdfBtnLabel",
+    "namingDetails", "pdfNamePattern", "mergedNamePattern", "zipNamePattern", "namingPreview",
+    "namingResetBtn",
     "aiProvider", "aiFields", "aiHelp", "aiNote", "aiParseBtn", "aiImageInput", "aiImageLabel",
     "aiImageSummary", "aiImageName", "aiImageMeta", "aiClearImageBtn",
   ].forEach((id) => {
@@ -107,6 +118,7 @@ document.addEventListener("DOMContentLoaded", () => {
 
   restoreCloudSettings();
   restoreAiSettings();
+  restoreNamingSettings();
   bindEvents();
   render();
 });
@@ -195,6 +207,14 @@ function bindEvents() {
     }
     els.cloudSaveBtn.addEventListener("click", saveCloudSettings);
     els.cloudForgetBtn.addEventListener("click", forgetCloudSettings);
+  }
+
+  ["pdfNamePattern", "mergedNamePattern", "zipNamePattern"].forEach((id) => {
+    if (!els[id]) return;
+    els[id].addEventListener("input", onNamingInput);
+  });
+  if (els.namingResetBtn) {
+    els.namingResetBtn.addEventListener("click", resetNamingSettings);
   }
 
   if (els.aiProvider) {
@@ -291,7 +311,7 @@ function applyQuickInput() {
     return record;
   });
   const records = appended ? state.records.concat(incoming) : incoming;
-  window.CertCore.assignOutputNames(records);
+  applyOutputNames(records);
   state.records = records;
   state.nextLineNo = records.length + 1;
   state.parseNotes = prepared.notes || [];
@@ -476,6 +496,16 @@ function onCellInput(event) {
 
   const field = cell.dataset.field;
   const value = cell.textContent.replace(/\u00a0/g, " ").trim();
+  // 输出文件名是当前批次的单行覆盖值，不参与证书数据校验。
+  // 输入过程中不回写当前单元格，避免自动补 `.pdf` 打断光标；失焦时统一规范化显示。
+  if (field === "outputName") {
+    record.outputNameOverride = window.CertCore.stripOutputExtension(value);
+    state.editing = { lineNo: record.lineNo, field: field };
+    applyOutputNames(state.records);
+    refreshFileNameCells(record.lineNo);
+    refreshStats();
+    return;
+  }
   const revalidated = window.CertCore.validateRecord({
     name: field === "name" ? value : record.name,
     hospital: field === "hospital" ? value : record.hospital,
@@ -486,7 +516,7 @@ function onCellInput(event) {
 
   // 输出文件名依赖姓名，必须在这里重算：不能等失焦（点别处/不回点都不会触发），
   // 否则表格里显示的文件名会停在旧值上。
-  window.CertCore.assignOutputNames(state.records);
+  applyOutputNames(state.records);
 
   // 只刷新这一行的状态与统计，避免整表重绘打断输入
   refreshRowStatus(record);
@@ -501,7 +531,7 @@ function onCellBlur(event) {
   const cell = findCell(event.target);
   if (!cell) return;
   state.editing = null;
-  window.CertCore.assignOutputNames(state.records);
+  applyOutputNames(state.records);
 
   // 鼠标点击造成的失焦不能整表重绘：重绘会把用户正准备点的「复制 / 删除」按钮从 DOM 里换掉，
   // 紧接着的 click 就落在了一个已脱离文档的元素上，第一次点击会被吞掉。
@@ -514,8 +544,9 @@ function onCellBlur(event) {
 }
 
 /** 只同步输出文件名单元格，不重建表格。 */
-function refreshFileNameCells() {
+function refreshFileNameCells(skipLineNo) {
   state.records.forEach((record) => {
+    if (record.lineNo === skipLineNo) return;
     const row = els.previewBody.querySelector(`tr[data-line="${record.lineNo}"]`);
     const fileCell = row && row.querySelector(".col-file");
     if (fileCell) {
@@ -570,7 +601,7 @@ function onRowAction(event) {
 function removeRow(lineNo) {
   state.records = state.records.filter((record) => record.lineNo !== lineNo);
   state.selected.delete(lineNo);
-  window.CertCore.assignOutputNames(state.records);
+  applyOutputNames(state.records);
   logActivity(`已删除第 ${lineNo} 行`);
   render();
 }
@@ -583,11 +614,12 @@ function duplicateRow(lineNo) {
     hospital: source.hospital,
     dateRaw: source.dateRaw,
   });
+  if (source.outputNameOverride) copy.outputNameOverride = source.outputNameOverride;
   copy.lineNo = state.nextLineNo;
   state.nextLineNo += 1;
   state.records.push(copy);
   if (copy.status === "ready") state.selected.add(copy.lineNo);
-  window.CertCore.assignOutputNames(state.records);
+  applyOutputNames(state.records);
   render();
 }
 
@@ -602,7 +634,7 @@ function addRow() {
   record.lineNo = state.nextLineNo;
   state.nextLineNo += 1;
   state.records.push(record);
-  window.CertCore.assignOutputNames(state.records);
+  applyOutputNames(state.records);
   render();
 
   const cell = els.previewBody.querySelector(
@@ -782,7 +814,13 @@ function renderTable() {
     row.appendChild(editableCell(record, "hospital", record.hospital, "医院名称", "col-hospital"));
     row.appendChild(editableCell(record, "dateRaw", record.dateRaw, "颁发日期", "col-date"));
 
-    const fileCell = cell(record.outputName || "—", "col-file");
+    const fileCell = editableCell(
+      record,
+      "outputName",
+      record.outputName || "",
+      "输出文件名（扩展名固定为 PDF）",
+      "col-file",
+    );
     fileCell.title = record.outputName || "";
     row.appendChild(fileCell);
 
@@ -802,7 +840,7 @@ function renderTable() {
 
   const parts = [`共 ${list.length} 条`];
   if (list.length > shown.length) parts.push(`表格只显示前 ${MAX_PREVIEW_ROWS} 条，生成不受影响`);
-  parts.push("点单元格即可修改，回车确认");
+  parts.push("姓名、医院、日期和输出文件名都可直接修改，PDF 后缀由系统固定");
   els.tableFootnote.textContent = parts.join(" · ") + "。";
 
   // 编辑中的单元格在重绘后恢复焦点与光标，避免用户打字打到一半被打断
@@ -978,6 +1016,114 @@ async function loadTemplate(templateId) {
   const checked = await window.CertCore.assertTemplate(bytes, spec.label);
   templateCache.set(templateId, checked);
   return checked;
+}
+
+/* -------------------------------------------------------------- 输出命名 */
+
+function namingDefaults() {
+  return Object.assign(
+    {
+      individual: "TE操作培训证书_{姓名}",
+      merged: "TE操作培训证书_{份数}份_{时间}",
+      archive: "TE操作培训证书_{时间}",
+    },
+    window.CertCore.DEFAULT_NAMING_PATTERNS || {},
+  );
+}
+
+function loadStoredNaming() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(NAMING_STORE_KEY) || "{}");
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function namingPattern(key) {
+  const defaults = namingDefaults();
+  const value = String((state.naming && state.naming[key]) || "").trim();
+  return value || defaults[key];
+}
+
+function persistNamingSettings() {
+  try {
+    localStorage.setItem(NAMING_STORE_KEY, JSON.stringify(state.naming));
+  } catch {
+    /* 隐私模式下 localStorage 可能不可写，本次会话内仍然有效 */
+  }
+}
+
+function restoreNamingSettings() {
+  const defaults = namingDefaults();
+  const stored = loadStoredNaming();
+  state.naming = {
+    individual: String(stored.individual || defaults.individual),
+    merged: String(stored.merged || defaults.merged),
+    archive: String(stored.archive || defaults.archive),
+  };
+  if (els.pdfNamePattern) els.pdfNamePattern.value = state.naming.individual;
+  if (els.mergedNamePattern) els.mergedNamePattern.value = state.naming.merged;
+  if (els.zipNamePattern) els.zipNamePattern.value = state.naming.archive;
+  renderNamingPreview();
+}
+
+function applyOutputNames(records) {
+  return window.CertCore.assignOutputNames(records || state.records, {
+    pattern: namingPattern("individual"),
+  });
+}
+
+function renderNamingPreview() {
+  if (!els.namingPreview || !window.CertCore) return;
+  const sample = {
+    姓名: "张三",
+    医院: "示例医院",
+    日期: "2025-10-20",
+    序号: "1",
+    份数: "3",
+    时间: "20250922_1200",
+  };
+  const individual = window.CertCore.renderFileName(
+    namingPattern("individual"), sample, "TE操作培训证书_张三", "pdf",
+  );
+  const merged = window.CertCore.renderFileName(
+    namingPattern("merged"), sample, "TE操作培训证书_3份", "pdf",
+  );
+  const archive = window.CertCore.renderFileName(
+    namingPattern("archive"), sample, "TE操作培训证书", "zip",
+  );
+  els.namingPreview.textContent = `示例：${individual} · 合并：${merged} · 压缩包：${archive}`;
+}
+
+function onNamingInput() {
+  state.naming = {
+    individual: els.pdfNamePattern ? els.pdfNamePattern.value : namingPattern("individual"),
+    merged: els.mergedNamePattern ? els.mergedNamePattern.value : namingPattern("merged"),
+    archive: els.zipNamePattern ? els.zipNamePattern.value : namingPattern("archive"),
+  };
+  persistNamingSettings();
+  applyOutputNames(state.records);
+  refreshFileNameCells();
+  refreshStats();
+  renderNamingPreview();
+}
+
+function resetNamingSettings() {
+  state.naming = namingDefaults();
+  try {
+    localStorage.removeItem(NAMING_STORE_KEY);
+  } catch {
+    /* 本次会话仍然可以恢复默认值 */
+  }
+  if (els.pdfNamePattern) els.pdfNamePattern.value = state.naming.individual;
+  if (els.mergedNamePattern) els.mergedNamePattern.value = state.naming.merged;
+  if (els.zipNamePattern) els.zipNamePattern.value = state.naming.archive;
+  applyOutputNames(state.records);
+  refreshFileNameCells();
+  refreshStats();
+  renderNamingPreview();
+  showToast("文件命名已恢复默认值。");
 }
 
 /* ------------------------------------------------------------ 云转换设置 */
@@ -1372,7 +1518,7 @@ async function runAiParse() {
       return record;
     });
     const records = appended ? state.records.concat(incoming) : incoming;
-    window.CertCore.assignOutputNames(records);
+    applyOutputNames(records);
     state.records = records;
     state.nextLineNo = records.length + 1;
     state.source = "ai";
@@ -1495,8 +1641,8 @@ async function buildCertificateItems(targets, templateBytes, needDocumentXml, on
       const item = {
         name: record.name,
         docx: docx,
-        // 文件名带姓名：客户要的是「每人一个 PDF」，同名重复靠 outputName 的 _2/_3 区分
-        fileName: (record.fileBase || "TE操作培训证书_" + record.name) + ".pdf",
+        // 预览与最终下载共用同一个已消毒、已去重的 PDF 文件名。
+        fileName: record.outputName || (record.fileBase || "TE操作培训证书_" + record.name) + ".pdf",
       };
       if (needDocumentXml) {
         const entries = await window.CertCore.readZip(docx);
@@ -1622,14 +1768,28 @@ async function generatePdf() {
 
     setProgress(list.length, list.length, "正在保存…");
     let savedBytes = 0;
+    const outputStamp = timestamp();
+    const aggregateValues = { 份数: list.length, 时间: outputStamp };
+    const mergedFileName = window.CertCore.renderFileName(
+      namingPattern("merged"),
+      aggregateValues,
+      `TE操作培训证书_${list.length}份_${outputStamp}`,
+      "pdf",
+    );
+    const archiveFileName = window.CertCore.renderFileName(
+      namingPattern("archive"),
+      aggregateValues,
+      `TE操作培训证书_${outputStamp}`,
+      "zip",
+    );
     const files = result.pdfList.map((item, index) => {
       savedBytes += item.bytes.length;
       // 逐份时用带姓名的文件名（客户就是按姓名分发的）；
       // 合批产物是一本合订本，退回带时间戳的统称文件名。
       return {
         name: result.batched
-          ? `TE操作培训证书_${list.length}份_${timestamp()}.pdf`
-          : item.fileName || `TE操作培训证书_${item.name || timestamp()}_${index + 1}.pdf`,
+          ? mergedFileName
+          : item.fileName || `TE操作培训证书_${item.name || outputStamp}_${index + 1}.pdf`,
         data: item.bytes,
       };
     });
@@ -1646,7 +1806,7 @@ async function generatePdf() {
       zipBytes = zip.length;
       triggerDownload(
         new Blob([zip], { type: "application/zip" }),
-        `TE操作培训证书_${timestamp()}.zip`,
+        archiveFileName,
       );
     } else {
       files.forEach((file) => {

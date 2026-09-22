@@ -287,11 +287,33 @@ function loadApp() {
   sandbox.self = sandbox;
   sandbox.globalThis = sandbox;
 
-  // 最小 CertCore / CertCloud 替身：只保留 app.js 初始化路径会碰到的部分
+  // 最小 CertCore / CertCloud 替身：只保留 app.js 初始化路径会碰到的部分。
+  //
+  // 注意这里不能省命名相关的成员：DOMContentLoaded → restoreNamingSettings →
+  // renderNamingPreview 会调 renderFileName，桩里缺了就在初始化中途抛错，
+  // 后续 29 条断言会跟着一起红 —— 看起来像页面坏了，其实只是桩的保真度不够。
+  // 之所以在桩里现写一遍而不是直接 require cert-core.js：那会把真实实现拉进来，
+  // 断言就不再只盯着 app.js 的接线了。
+  //
+  // DEFAULT_NAMING_PATTERNS 是防漂移的唯一来源：真实默认值一旦改了，
+  // 下面的断言会直接指出这份副本过期，而不是悄悄让桩和实现分叉。
   sandbox.CertCore = {
     TEMPLATES: {
       general: { id: "general", label: "一般版本", file: "template-general.docx" },
       special: { id: "special", label: "260513 特殊版本", file: "template-special.docx" },
+    },
+    DEFAULT_NAMING_PATTERNS: {
+      individual: "TE操作培训证书_{姓名}",
+      merged: "TE操作培训证书_{份数}份_{时间}",
+      archive: "TE操作培训证书_{时间}",
+    },
+    stripOutputExtension: (value) =>
+      String(value == null ? "" : value).trim().replace(/\.(?:pdf|docx|zip)$/i, ""),
+    renderFileName: (pattern, values, fallback, extension) => {
+      const expanded = String(pattern == null ? "" : pattern).replace(/\{([^{}]+)\}/g, (whole, key) =>
+        Object.prototype.hasOwnProperty.call(values || {}, key) ? String(values[key]) : whole,
+      );
+      return expanded + "." + String(extension || "pdf").replace(/^\.+/, "");
     },
   };
   sandbox.CertCloud = require(path.join(TOOL, "cert-cloud.js"));
@@ -333,6 +355,17 @@ check(
   app.errors.join(" | "),
 );
 check("没有 console.error", !app.errors.some((e) => e.startsWith("error:")), app.errors.join(" | "));
+
+// 桩里的 DEFAULT_NAMING_PATTERNS 是真实默认值的副本。副本过期不会报错，
+// 只会让这个套件悄悄不再覆盖真实行为 —— 所以拿真实现逐字段比一次。
+const realCore = require(path.join(TOOL, "cert-core.js"));
+check(
+  "桩里的命名默认值与 cert-core.js 一致",
+  JSON.stringify(app.sandbox.CertCore.DEFAULT_NAMING_PATTERNS) ===
+    JSON.stringify(realCore.DEFAULT_NAMING_PATTERNS),
+  "桩=" + JSON.stringify(app.sandbox.CertCore.DEFAULT_NAMING_PATTERNS) +
+    " 实现=" + JSON.stringify(realCore.DEFAULT_NAMING_PATTERNS),
+);
 
 console.log("\n[2] 云转换设置面板");
 const providerSelect = app.registry.get("cloudProvider");

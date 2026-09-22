@@ -75,6 +75,11 @@
     general: { id: "general", label: "一般版本", file: "template-general.docx" },
     special: { id: "special", label: "260513 特殊版本", file: "template-special.docx" },
   };
+  const DEFAULT_NAMING_PATTERNS = Object.freeze({
+    individual: "TE操作培训证书_{姓名}",
+    merged: "TE操作培训证书_{份数}份_{时间}",
+    archive: "TE操作培训证书_{时间}",
+  });
   const MAX_ROWS = 3000;
   const ZIP_DOS_TIME = 0x0021; // 1980-01-01 00:00:08，固定值让压缩包可复现
   const ZIP_DOS_DATE = 0x0021; // 1980-01-01
@@ -270,18 +275,60 @@
     };
   }
 
+  /** 日期占位符统一成 YYYY-MM-DD；无效日期保留原文，方便用户在预览里发现问题。 */
+  function outputDate(record) {
+    if (record && record.date) {
+      return [record.date.year, record.date.month, record.date.day].join("-");
+    }
+    return stripOuter(record && record.dateRaw);
+  }
+
+  /** 去掉用户可能顺手输入的扩展名；真正的扩展名由调用方固定追加。 */
+  function stripOutputExtension(value) {
+    return String(value == null ? "" : value).trim().replace(/\.(?:pdf|docx|zip)$/i, "");
+  }
+
+  /** 展开文件名模板并清理非法字符。未知占位符原样保留，避免静默吞掉用户文字。 */
+  function renderFileBase(pattern, values, fallback) {
+    const source = stripOutputExtension(pattern);
+    const expanded = source.replace(/\{([^{}]+)\}/g, (whole, key) =>
+      Object.prototype.hasOwnProperty.call(values || {}, key)
+        ? String(values[key] == null ? "" : values[key])
+        : whole,
+    );
+    return safeFileName(expanded, fallback || "未命名", 120);
+  }
+
+  function renderFileName(pattern, values, fallback, extension) {
+    const ext = String(extension || "pdf").replace(/^\.+/, "").toLowerCase();
+    return renderFileBase(pattern, values, fallback) + "." + ext;
+  }
+
   /**
-   * 生成输出文件名：同名自动加 _2、_3 后缀。
+   * 生成最终 PDF 文件名：同名自动加 _2、_3 后缀。
    * 后缀只用于文件名，**不会**写进证书里的姓名（原 Python 脚本会把「张三_2」印在证书上）。
+   * `record.outputNameOverride` 是当前批次的单行覆盖值；扩展名仍由程序固定为 .pdf。
    */
-  function assignOutputNames(records) {
+  function assignOutputNames(records, options) {
+    const pattern = (options && options.pattern) || DEFAULT_NAMING_PATTERNS.individual;
     const occurrences = new Map();
-    records.forEach((record) => {
-      const count = (occurrences.get(record.name) || 0) + 1;
-      occurrences.set(record.name, count);
-      const base = safeFileName(record.name, "第" + record.lineNo + "行");
-      record.fileBase = "TE操作培训证书_" + base;
-      record.outputName = record.fileBase + (count > 1 ? "_" + count : "") + ".docx";
+    records.forEach((record, index) => {
+      const values = {
+        姓名: record.name,
+        医院: record.hospital,
+        日期: outputDate(record),
+        序号: record.lineNo || index + 1,
+      };
+      const fallback = "TE操作培训证书_" + safeFileName(record.name, "第" + values.序号 + "行");
+      const override = stripOutputExtension(record.outputNameOverride);
+      const base = override
+        ? safeFileName(override, fallback, 120)
+        : renderFileBase(pattern, values, fallback);
+      const key = base.toLocaleLowerCase();
+      const count = (occurrences.get(key) || 0) + 1;
+      occurrences.set(key, count);
+      record.fileBase = base + (count > 1 ? "_" + count : "");
+      record.outputName = record.fileBase + ".pdf";
       record.fileNameDuplicated = count > 1;
       record.duplicate = count > 1;
     });
@@ -466,11 +513,11 @@
   }
 
   /** 文件名只做 Windows/浏览器非法字符替换，中文姓名原样保留（Python 版同此）。 */
-  function safeFileName(name, fallback) {
+  function safeFileName(name, fallback, maxLength) {
     const cleaned = String(name || "")
       .replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_")
       .replace(/[. ]+$/, "")
-      .slice(0, 60);
+      .slice(0, maxLength || 60);
     return cleaned || fallback || "未命名";
   }
 
@@ -879,6 +926,7 @@
 
   return {
     TEMPLATES: TEMPLATES,
+    DEFAULT_NAMING_PATTERNS: DEFAULT_NAMING_PATTERNS,
     MAX_ROWS: MAX_ROWS,
     constants: {
       NAME_BOX_POS_ORIG: NAME_BOX_POS_ORIG,
@@ -911,6 +959,9 @@
     parseQuickEntry: parseQuickEntry,
     prepareRecordsFromText: prepareRecordsFromText,
     safeFileName: safeFileName,
+    stripOutputExtension: stripOutputExtension,
+    renderFileBase: renderFileBase,
+    renderFileName: renderFileName,
     fillDocumentXml: fillDocumentXml,
     buildDocx: buildDocx,
     fetchBytes: fetchBytes,

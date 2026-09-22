@@ -360,6 +360,60 @@ function testDate() {
   check("空日期抛错", threw);
 }
 
+/* ----------------------------------------------------------- 5b. 文件命名 */
+
+function testOutputNaming() {
+  console.log("\n[5b] PDF 文件命名：预览、模板、自定义与去重");
+
+  const records = [
+    Object.assign(core.validateRecord({
+      name: "张三",
+      hospital: "甲/医院",
+      dateRaw: "2025-10-20",
+    }), { lineNo: 1 }),
+    Object.assign(core.validateRecord({
+      name: "张三",
+      hospital: "甲/医院",
+      dateRaw: "2025-10-20",
+    }), { lineNo: 2 }),
+  ];
+
+  core.assignOutputNames(records);
+  equal("默认预览是 PDF，不再显示 DOCX", records[0].outputName, "TE操作培训证书_张三.pdf");
+  equal("同名第二份自动加 _2", records[1].outputName, "TE操作培训证书_张三_2.pdf");
+  equal("fileBase 同样含去重后缀（最终下载不能丢）", records[1].fileBase, "TE操作培训证书_张三_2");
+  check("重复标记只落在后续冲突项", !records[0].fileNameDuplicated && records[1].fileNameDuplicated);
+
+  core.assignOutputNames(records, { pattern: "{序号}_{医院}_{姓名}_{日期}" });
+  equal(
+    "模板展开姓名/医院/日期/序号并清理非法字符",
+    records[0].outputName,
+    "1_甲_医院_张三_2025-10-20.pdf",
+  );
+  equal("序号不同后不再误判重名", records[1].outputName, "2_甲_医院_张三_2025-10-20.pdf");
+
+  // 用 ASCII 冒号：safeFileName 只替换 Windows 非法字符，全角「：」是合法字符、
+  // 会被原样保留。这条断言要验的是「去掉旧扩展名并固定 .pdf」，不是字符替换，
+  // fixture 里放全角冒号会让期望值和真实行为对不上。
+  records[0].outputNameOverride = "客户指定:张三.docx";
+  core.assignOutputNames(records, { pattern: "不会使用_{姓名}" });
+  equal("单行覆盖会去掉旧扩展名并固定为 PDF", records[0].outputName, "客户指定_张三.pdf");
+  records[0].outputNameOverride = "";
+  core.assignOutputNames(records, { pattern: "新规则_{姓名}" });
+  equal("清空单行覆盖后恢复批量规则", records[0].outputName, "新规则_张三.pdf");
+
+  equal(
+    "合并 PDF 模板固定追加 .pdf",
+    core.renderFileName("归档_{份数}人_{时间}.docx", { 份数: 3, 时间: "20250922_1200" }, "归档", "pdf"),
+    "归档_3人_20250922_1200.pdf",
+  );
+  equal(
+    "ZIP 模板固定追加 .zip",
+    core.renderFileName("证书包_{时间}.pdf", { 时间: "20250922_1200" }, "证书包", "zip"),
+    "证书包_20250922_1200.zip",
+  );
+}
+
 /* ------------------------------------------------------------- 6. AI 抽取 */
 
 function testAiExtraction() {
@@ -960,6 +1014,7 @@ async function testPdfZip() {
   testProviders();
   testMerge();
   testDate();
+  testOutputNaming();
   testAiExtraction();
   await testOutputModes();
   await testPdfZip();
