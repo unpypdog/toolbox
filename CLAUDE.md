@@ -25,7 +25,8 @@ toolbox/
 │       ├── app.js
 │       ├── cert-core.js            # 模板填充、ZIP、日期解析（无网络）
 │       ├── cert-cloud.js           # 云端 DOCX→PDF 适配层（浏览器直连）
-│       ├── cert-merge.js           # 多页 DOCX 拼装 + PDF 合并
+│       ├── cert-ai.js              # AI 名单抽取（OpenAI 兼容接口，支持图片）
+│       ├── cert-merge.js           # PDF 合并（备用工具，页面未加载，见文件头说明）
 │       ├── styles.css
 │       ├── build-templates.js      # docx → base64 载荷（改了 docx 必须重跑）
 │       ├── template-*.docx         # 证书模板
@@ -39,12 +40,13 @@ toolbox/
     ├── test_toolbox.py
     ├── test_training_cert_batch_fill.py
     ├── test_te_cert_cloud_core.js        # 证书工具核心逻辑（纯 Node）
-    └── lint_te_cert_cloud.js             # 证书工具接线检查（纯 Node）
+    ├── lint_te_cert_cloud.js             # 证书工具接线检查（纯 Node）
+    └── test_te_cert_dom_smoke.js         # 证书工具 DOM 冒烟（最小 DOM 桩）
 ```
 
-### te-cert-generator 的五条硬约束
+### te-cert-generator 的十二条硬约束
 
-改这个工具前先读这五条，都是踩过的坑：
+改这个工具前先读这十二条，都是踩过的坑：
 
 1. **模板改了必须重跑载荷**：`node tools/te-cert-generator/build-templates.js`。
    `file://` 下 Chromium 拒绝 fetch 同目录的 docx，模板只能靠 base64 载荷用
@@ -55,7 +57,12 @@ toolbox/
    的 CSP，linter 会核对两边是否一致。
 3. **不能说"不上传"**：DOCX 全程本地，但 PDF 转换会把证书内容发给用户选定的
    云服务。页面文案必须讲清楚这一点，默认值必须是"不转换"。
-4. **Adobe PDF Services 必须用它的专属令牌端点**（照搬通用 Adobe IMS 会一直 400）：
+4. **不提供 DOCX 下载入口**：证书一旦发出去就是最终版，源文件可以被随意改动，
+   不适合交付给学员。DOCX 只作为云转换的**中间产物**存在 ——
+   `CertCore.buildDocx` 与 `buildCertificateItems` 必须保留（PDF 转换依赖它们），
+   但页面上不能有任何"下载 / 导出 DOCX / ZIP 里是 docx"的入口或文案。
+   `test_te_cert_dom_smoke.js` 的 `[5b]` 节有反向断言，防止以后被"顺手"加回来。
+5. **Adobe PDF Services 必须用它的专属令牌端点**（照搬通用 Adobe IMS 会一直 400）：
 
    ```
    POST https://pdf-services.adobe.io/token      ← 不是 ims-na1.adobelogin.com/ims/token/v3
@@ -68,16 +75,54 @@ toolbox/
    错误正文。另外 Adobe 的资产上传与成品下载都是直连 S3 预签名地址，CSP 必须放行
    `dcplatformstorageservice-prod-us-east-1.s3-accelerate.amazonaws.com`（美国区）
    和 `dcplatformstorageservice-prod-eu-west-1.s3.amazonaws.com`（欧洲区）。
-5. **合批必须显式插分页符**：每份证书靠 `<w:p>` 分隔，但背景图是 `<wp:anchor>`
-   浮动对象、不贡献段落高度，所以不能指望它撑页。实测 15 份合批被引擎全排进
-   一页。要在第二份起每份前面插入 `<w:p><w:r><w:br w:type="page"/></w:r></w:p>`。
-6. **不要给 Adobe 的请求加自定义头**（除了 `Authorization` / `Content-Type` / `X-Api-Key`）。
+6. **PDF 默认逐份输出、自动打包成一个 ZIP**：证书是发给个人的，文件名形如
+   `TE操作培训证书_姓名.pdf`（同名重复用 `_2`、`_3` 区分，靠 `record.fileBase`）。
+   多个文件必须**打成一个 ZIP 再下载**，且**不设开关**（`const shouldZip = files.length > 1;`）——
+   连续触发多次下载会被浏览器拦（要用户逐次点"允许"），还得逐个确认保存位置；
+   这是技术细节，不该让用户做选择。单文件不打包，省掉一次解压。
+   合成一本多页 PDF 是唯一的开关（`els.pdfMergeToggle`，默认不勾），供归档用 ——
+   默认值不能改成合并，客户明确不接受合订本（收件人得自己找自己那页）。
+   计费差异：逐份 = N 次调用；合并 = 1 次（Adobe 按「1 事务最多 50 页」计费）。
+7. **合批必须显式插分页符**（只在勾选合并时走这条路）：每份证书靠 `<w:p>` 分隔，
+   但背景图是 `<wp:anchor>` 浮动对象、不贡献段落高度，所以不能指望它撑页。
+   实测 15 份合批被引擎全排进一页。要在第二份起每份前面插入
+   `<w:p><w:r><w:br w:type="page"/></w:r></w:p>`。
+   另外合批需要每份的 `documentXml`（由 `readZip` 取出），缺了要**明确报错**，
+   不能拿 undefined 去拼、产出一份坏文档。
+8. **不要给 Adobe 的请求加自定义头**（除了 `Authorization` / `Content-Type` / `X-Api-Key`）。
    浏览器对任何非简单请求头都会先发预检，预检没过就直接拦掉、请求到不了服务端。
    实测 `createpdf` 端点允许的头只有 `Authorization, Content-Type, X-Api-Key,
    User-Agent, If-Modified-Since, x-api-app-info` —— 加个看起来很无害的
    `x-request-id` 就会报 "Request header field … is not allowed by
    Access-Control-Allow-Headers"。**Node 的 fetch 不做预检，所以这类问题在 Node 侧
    探测和单元测试里全都看不见**；`lint_te_cert_cloud.js` 有一条专门核对它。
+
+9. **AI 抽取结果必须走 `core.validateRecord`，且字段名不能自创**。
+   它读的是 **`dateRaw`**（原始日期字符串），不是 `dateText`；写成后者会让**每一条**
+   都报「缺少颁发日期」——看起来像"AI 没抽到日期"，实际是适配层写错了字段名。
+   `cert-ai.js` 的 `normalize()` 只负责把模型输出转成 core 约定的形状，
+   校验一律交给 core，绝不自己写一套（那样 AI 的结果就可能绕过校验直接生成证书）。
+   这条契约有断言钉着：`test_te_cert_cloud_core.js` 的 `[6]` 节。
+
+10. **每个云/AI 模块都要在 `index.html` 里真的加载**。
+   `app.js` 里写的是 `if (!window.CertAi) return;`，漏加载 `<script>` 的后果是
+   **整个面板静默不渲染**——页面上不报错，只是"那块功能不见了"。
+   `lint_te_cert_cloud.js` 会核对 `window.CertX` 与 `<script src>` 是否配套。
+
+11. **AI 提示词里绝对不能出现具体日期与机构名**（示例只能用占位符）。
+   真踩过：示例里写了「〈某医院〉 2025年10月10日」，用户在文本框里写的是
+   `26年1月12日`、图片上没有日期，结果模型把**示例里的日期**当成了真实信息，
+   套到所有记录上，产出一批日期全错的证书。
+   现在提示词里的具体值一律写成 `〈机构全称A〉`／`〈日期B〉` 这类占位符，
+   `test_te_cert_cloud_core.js` 的 `[6]` 节有一条断言扫描提示词里
+   是否残留 `\d{4}[-年]\d{1,2}[-月]\d{1,2}` 形态的真实日期。
+
+12. **文字输入对图片有最高优先级，措辞不能留余地**。
+    "以文字为主要来源"这种说法不够 —— 模型会去**比较**两边的日期然后挑一个
+    （实测挑了年份更小的）。提示词里必须写成「文字优先级最高、无条件覆盖图片」
+    「图片上印的日期一律忽略、不要拿它和文字里的日期比较」，
+    并明确「文字里写了某字段就不算不确定，不要在 note 里质疑它」——
+    否则每条都会挂一句"待核对"，用户就分不清哪些真的需要核对了。
 
 
 ### te-cert-generator 参考资料：字体与姓名框几何

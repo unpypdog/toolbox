@@ -92,6 +92,7 @@ const scripts = (indexHtml.match(/<script[^>]*src="([^"]+)"/g) || []).map((t) =>
   t.replace(/.*src="|"/g, ""),
 );
 check("页面引用了 cert-cloud.js", scripts.includes("./cert-cloud.js"), scripts.join(", "));
+check("页面引用了 cert-ai.js", scripts.includes("./cert-ai.js"), scripts.join(", "));
 check(
   "已移除旧的 cert-pdf.js 引用",
   !scripts.includes("./cert-pdf.js"),
@@ -112,6 +113,27 @@ check(
   fs.existsSync(path.join(TOOL, "cert-merge.js")),
 );
 
+// app.js 用到的每个全局模块，页面都必须真的加载它。
+// 漏一个的后果是静默的：初始化里那句 `if (!window.CertX) return;` 会让整个面板
+// 不渲染，页面上没有报错，只是"那块功能不见了"。
+// （在 DOM 冒烟测试的桩里踩过一次：没注入 CertAi 时 AI 面板整块不出现。）
+const globalModules = [
+  { global: "CertCore", file: "cert-core.js" },
+  { global: "CertCloud", file: "cert-cloud.js" },
+  { global: "CertAi", file: "cert-ai.js" },
+];
+for (const item of globalModules) {
+  const used = new RegExp("window\\.?" + item.global + "\\b|window\\[\"" + item.global + "\"\\]").test(appJs);
+  check("app.js 用到了 " + item.global, used, "没用到就不用管加载，但通常意味着接线断了");
+  if (used) {
+    check(
+      "页面加载了 " + item.file + "（否则 " + item.global + " 相关面板会静默不渲染）",
+      scripts.includes("./" + item.file),
+      "app.js 在用 " + item.global + "，但 index.html 没有 <script src=\"./" + item.file + "\">",
+    );
+  }
+}
+
 for (const src of scripts) {
   const file = src.replace("./", "");
   check("脚本文件存在: " + file, fs.existsSync(path.join(TOOL, file)));
@@ -126,13 +148,19 @@ check("CSP 放行 blob:（背景图需要）", /img-src[^;]*blob:/.test(csp), cs
 // 注意：必须先剥掉注释再提取 —— 否则注释里"曾经用过某端点"的记录会被当成
 // 实际依赖，检查就变成了误报制造机（真踩过：把旧 IMS 端点写进注释后，
 // 这条检查开始报「CSP 缺少 ims-na1.adobelogin.com」，而代码早就不用它了）。
-const cloudCode = certCloud
-  .replace(/\/\*[\s\S]*?\*\//g, " ")   // 块注释
-  .replace(/(^|[^:])\/\/[^\n]*/g, "$1 "); // 行注释（避免误伤 https://）
+function stripComments(source) {
+  return source
+    .replace(/\/\*[\s\S]*?\*\//g, " ")   // 块注释
+    .replace(/(^|[^:])\/\/[^\n]*/g, "$1 "); // 行注释（避免误伤 https://）
+}
 
-const cloudHosts = new Set(
-  (cloudCode.match(/https:\/\/[a-z0-9.-]+/g) || []).map((u) => new URL(u).host),
-);
+function hostsIn(source) {
+  return new Set(
+    (stripComments(source).match(/https:\/\/[a-z0-9.-]+/g) || []).map((u) => new URL(u).host),
+  );
+}
+
+const cloudHosts = hostsIn(certCloud);
 const missingHosts = [...cloudHosts].filter((host) => !csp.includes(host));
 check(
   "cert-cloud.js 实际用到的域名都在 CSP 白名单里",
@@ -143,6 +171,22 @@ check(
   "剥注释后仍提取到域名（防止正则把代码也剥没了）",
   cloudHosts.size >= 3,
   "只提取到 " + JSON.stringify([...cloudHosts]),
+);
+
+// AI 模块同理：它直连的端点也必须在 CSP 白名单里，否则浏览器直接拦掉请求。
+// 这是"AI 解析根本发不出去"这类故障的第一嫌疑点。
+const certAi = read("cert-ai.js");
+const aiHosts = hostsIn(certAi);
+const missingAiHosts = [...aiHosts].filter((host) => !csp.includes(host));
+check(
+  "cert-ai.js 实际用到的域名都在 CSP 白名单里",
+  missingAiHosts.length === 0,
+  "CSP 缺少: " + JSON.stringify(missingAiHosts) + " —— AI 请求会被浏览器直接拦掉",
+);
+check(
+  "cert-ai.js 确实声明了直连端点",
+  aiHosts.size >= 1,
+  "一个域名都没提取到，检查等于空转",
 );
 check(
   "CSP 没有放开通配 https:（避免变成任意外发通道）",

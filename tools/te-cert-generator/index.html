@@ -13,17 +13,19 @@
         得到的是 blob: 地址，只写 data: 不够（漏掉会让背景图被静默拦掉，页面上只剩文字）。
       - connect-src 放行 file: —— 本工具要读同目录下的 docx 模板；
         file:// 页面的 origin 是不透明的 null，'self' 匹配不上。
-      - connect-src 还放行三个云转换服务 —— 用户显式选择服务商后，浏览器直连它们
-        把 DOCX 转成 PDF。不选服务商时不会发出任何请求。这些域名是白名单写死的，
-        不接受任意地址，避免变成通用外发通道。
+      - connect-src 还放行云转换服务与 AI 解析服务 —— 用户显式选择服务商后，浏览器直连它们
+        把 DOCX 转成 PDF、或把名单文本/图片抽成结构化记录。不选服务商时不会发出任何请求。
+        这些域名是白名单写死的，不接受任意地址，避免变成通用外发通道。
       - Adobe 的两条 S3 主机必不可少：它的资产上传与成品下载都是直连 S3 预签名地址
         （dcplatformstorageservice-prod-*.s3*.amazonaws.com），漏掉会让上传阶段失败。
         令牌走 pdf-services.adobe.io/token，不再需要 ims-na1.adobelogin.com。
+      - api.deepseek.com 用于 AI 解析名单。注意「其它 OpenAI 兼容接口」若填了白名单之外的
+        地址，浏览器会直接拦掉 —— 这是刻意的限制，不为任意端点开口子。
       - script-src 保持 'self' —— 脚本只从本目录加载，包括本机首选的 base64 模板载荷。
     -->
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self' file: https://v2.convertapi.com https://api.cloudconvert.com https://pdf-services.adobe.io https://pdf-services-ue1.adobe.io https://dcplatformstorageservice-prod-us-east-1.s3-accelerate.amazonaws.com https://dcplatformstorageservice-prod-eu-west-1.s3.amazonaws.com; object-src 'none'; base-uri 'self'; form-action 'self'"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data: blob:; connect-src 'self' file: https://v2.convertapi.com https://api.cloudconvert.com https://pdf-services.adobe.io https://pdf-services-ue1.adobe.io https://dcplatformstorageservice-prod-us-east-1.s3-accelerate.amazonaws.com https://dcplatformstorageservice-prod-eu-west-1.s3.amazonaws.com https://api.deepseek.com; object-src 'none'; base-uri 'self'; form-action 'self'"
     />
     <title>TE 培训证书批量生成</title>
     <link
@@ -35,6 +37,7 @@
     <script defer src="./xlsx.full.min.js"></script>
     <script defer src="./cert-core.js"></script>
     <script defer src="./cert-cloud.js"></script>
+    <script defer src="./cert-ai.js"></script>
     <!--
       cert-merge.js 刻意不在此加载：它只在「逐份转换的 PDF 需要合并」时才用得上，
       而主路径是「N 份拼成一份多页 DOCX → 一次请求换回一份多页 PDF」，不需要合并。
@@ -92,6 +95,55 @@
             <button id="insertSampleBtn" class="button button--ghost" type="button">插入示例</button>
           </div>
 
+          <details id="aiBlock" class="import-block">
+            <summary>格式复杂、想用图片、或图 + 文混合？交给 AI 解析</summary>
+
+            <p class="panel-note">
+              规则解析只认固定写法（顿号隔开姓名 + 医院名以「医院/卫生院」等词结尾 + 标准日期）。
+              表格粘贴、姓名与信息分行、一句话叙述、手机拍的签到表都解析不了 —— 这些交给 AI。
+              <b>AI 结果同样要过校验</b>，缺项会红标出来让你核对，不会静默生成。
+            </p>
+
+            <p class="panel-note">
+              <b>文本和图片可以一起用，而且常用组合是</b>：
+              图片放名单（手写、截图都行），上面输入框里写医院名称和日期。
+              两者会被合并成同一个名单 —— 姓名以图片为准，医院与日期套用到每位，
+              不会把它们当成两批人。
+            </p>
+
+            <label class="field-label" for="aiProvider">解析服务</label>
+            <select id="aiProvider" class="cloud-select"></select>
+
+            <div id="aiFields" class="cloud-fields"></div>
+            <p id="aiHelp" class="cloud-help"></p>
+
+            <label class="field-label" for="aiImageInput">
+              图片（可选，与上面的输入框一起解析）
+            </label>
+            <label id="aiImageLabel" class="drop-zone drop-zone--compact" for="aiImageInput" tabindex="0">
+              <input id="aiImageInput" type="file" accept="image/jpeg,image/png,image/gif,image/webp" />
+              <strong>选择或拖入名单图片</strong>
+              <span>支持 JPEG / PNG / GIF / WebP，单张不超过 12 MB。只选图片不填文本也可以。</span>
+            </label>
+            <div id="aiImageSummary" class="file-summary is-empty" aria-live="polite">
+              <span id="aiImageName">尚未选择图片</span>
+              <span id="aiImageMeta"></span>
+            </div>
+
+            <div class="action-row">
+              <button id="aiParseBtn" class="button button--secondary button--small" type="button" disabled>
+                AI 解析
+              </button>
+              <button id="aiClearImageBtn" class="button button--ghost button--small" type="button" disabled>
+                移除图片
+              </button>
+            </div>
+
+            <p id="aiNote" class="cloud-note">
+              默认不联网。选了服务并填好密钥后才会把名单内容（或图片）发给该服务。
+            </p>
+          </details>
+
           <details class="import-block">
             <summary>名单已经在 CSV / Excel 里？改用文件导入</summary>
             <label id="fileDropLabel" class="drop-zone" for="fileInput" tabindex="0">
@@ -133,29 +185,23 @@
         <section class="panel" aria-labelledby="action-heading">
           <div class="panel-number" aria-hidden="true">03</div>
           <div class="panel-heading">
-            <h2 id="action-heading">生成与下载</h2>
+            <h2 id="action-heading">生成 PDF</h2>
           </div>
           <div class="action-stack">
-            <button id="generateBtn" class="button button--primary" type="button" disabled>
-              <span>生成 ZIP（DOCX）</span>
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 19h14" /></svg>
-            </button>
-            <button id="downloadSelectedBtn" class="button button--ghost" type="button" disabled>
-              只下载勾选的 <span id="selectedCount">0</span> 条
-            </button>
             <button id="clearAllBtn" class="button button--ghost" type="button" disabled>
               清空表格
             </button>
           </div>
           <p class="panel-note">
-            ZIP 里是每人的 .docx 证书，本地生成、零网络，需要二次编辑时用这个。
+            只产出 PDF。证书一旦发出去就是最终版，所以不提供 DOCX 下载 ——
+            源文件可以被随意改动，不适合交付给学员。
           </p>
 
           <div class="cloud-block">
-            <h3 class="cloud-title">PDF 转换（可选）</h3>
+            <h3 class="cloud-title">PDF 转换服务</h3>
             <p class="panel-note">
-              DOCX 是本机生成的；要 PDF 就得有人做排版，浏览器做不好这件事，
-              所以交给云服务。选好服务商并填密钥后，点下面的按钮一次拿到多页 PDF。
+              PDF 需要真正的排版引擎，浏览器做不好这件事，所以交给云服务。
+              选好服务商并填密钥后，点下面的按钮开始转换。
             </p>
 
             <label class="field-label" for="cloudProvider">转换服务</label>
@@ -163,6 +209,22 @@
 
             <div id="cloudFields" class="cloud-fields"></div>
             <p id="cloudHelp" class="cloud-help"></p>
+
+            <label class="merge-toggle" for="pdfMergeToggle">
+              <input id="pdfMergeToggle" type="checkbox" />
+              <span>
+                <b>改为合并成一份多页 PDF</b>
+                <small>
+                  默认每人一个独立 PDF（<code>TE操作培训证书_姓名.pdf</code>），
+                  多个文件会自动打包成一个 ZIP 下载，解压后就是一个个带姓名的 PDF。
+                  勾上则合成一本合订本，适合归档。
+                </small>
+                <small class="merge-toggle__cost">
+                  计费差异：逐份 = 每人一次调用；合并 = 整批一次调用
+                  （Adobe 按「1 事务最多 50 页」计费，合并能把 N 次压成 1 次）。
+                </small>
+              </span>
+            </label>
 
             <div class="action-row">
               <button id="cloudSaveBtn" class="button button--ghost button--small" type="button" disabled>
@@ -174,7 +236,7 @@
             </div>
 
             <button id="pdfBtn" class="button button--secondary" type="button" disabled>
-              <span>转换并下载 PDF</span>
+              <span id="pdfBtnLabel">转换并下载 PDF（每人一个）</span>
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 19h14" /></svg>
             </button>
 
@@ -266,9 +328,12 @@
           </div>
           <div class="table-footer">
             <p id="tableFootnote" class="table-footnote"></p>
-            <button id="addRowBtn" class="button button--ghost button--small" type="button">
-              + 新增一行
-            </button>
+            <div class="table-footer__actions">
+              <span id="selectedCount" class="selected-count">未勾选</span>
+              <button id="addRowBtn" class="button button--ghost button--small" type="button">
+                + 新增一行
+              </button>
+            </div>
           </div>
         </div>
 

@@ -46,11 +46,11 @@ function makeElement(id) {
   const listeners = new Map();
   const children = [];
   let text = "";
+  const classSet = new Set();
 
   const element = {
     id: id || "",
     tagName: "DIV",
-    className: "",
     value: "",
     checked: false,
     disabled: false,
@@ -60,6 +60,29 @@ function makeElement(id) {
     style: {},
     children: children,
     parentNode: null,
+    // 真实 DOM 的 classList 每个元素都有。桩里缺它会让被测代码直接抛
+    // 「Cannot read properties of undefined」——那是桩的缺陷，不是代码的 bug。
+    classList: {
+      add: (...names) => names.forEach((name) => classSet.add(name)),
+      remove: (...names) => names.forEach((name) => classSet.delete(name)),
+      contains: (name) => classSet.has(name),
+      toggle: (name, force) => {
+        const on = force === undefined ? !classSet.has(name) : Boolean(force);
+        if (on) classSet.add(name);
+        else classSet.delete(name);
+        return on;
+      },
+    },
+    get className() {
+      return Array.from(classSet).join(" ");
+    },
+    set className(value) {
+      classSet.clear();
+      String(value || "")
+        .split(/\s+/)
+        .filter(Boolean)
+        .forEach((name) => classSet.add(name));
+    },
     // 真实 DOM 里给 textContent 赋值会清空所有子节点（文本替换元素内容）。
     // 桩如果把它当普通属性，清空操作就失效，会掩盖真实的时序 bug ——
     // 这里必须按规范语义实现。
@@ -113,14 +136,20 @@ function makeElement(id) {
     },
     querySelectorAll(selector) {
       // 真实 querySelectorAll 查的是**所有后代**，不只是直接子元素。
-      // 云密钥输入框嵌在 <label> 里（div > label > input），只看直接子元素会查不到，
-      // 那时测试失败反映的是桩的缺陷，而不是被测代码有问题。
-      // dataset.cloudField 对应 HTML 的 data-cloud-field 属性。
-      if (selector !== "[data-cloud-field]") return [];
+      // 云密钥与 AI 输入框都嵌在 <label> 里（div > label > input），
+      // 只看直接子元素会查不到，那时失败反映的是桩的缺陷而不是被测代码有问题。
+      // 支持两种选择器：data-cloud-field（云转换）与 data-ai-field（AI 解析）。
+      const key =
+        selector === "[data-cloud-field]"
+          ? "cloudField"
+          : selector === "[data-ai-field]"
+            ? "aiField"
+            : null;
+      if (!key) return [];
       const found = [];
       const walk = (node) => {
         node.children.forEach((child) => {
-          if (child.dataset && child.dataset.cloudField) found.push(child);
+          if (child.dataset && child.dataset[key]) found.push(child);
           walk(child);
         });
       };
@@ -209,6 +238,16 @@ function loadApp() {
         delete this._data[key];
       },
     },
+    // FileReader 桩：AI 图片读取要用。回调立即触发，模拟读成功。
+    FileReader: function FileReader() {
+      this.result = null;
+      this.onload = null;
+      this.onerror = null;
+      this.readAsDataURL = () => {
+        this.result = "data:image/jpeg;base64,AAAA";
+        if (this.onload) this.onload();
+      };
+    },
     setTimeout: (fn) => {
       if (typeof fn === "function") fn();
       return 0;
@@ -256,6 +295,10 @@ function loadApp() {
     },
   };
   sandbox.CertCloud = require(path.join(TOOL, "cert-cloud.js"));
+  // AI 模块也要加载：app.js 的 restoreAiSettings 依赖 window.CertAi，
+  // 桩里不给它就会静默跳过整个 AI 面板的渲染 —— 那是桩的保真度问题，
+  // 会让人误以为页面代码坏了。（真实页面里靠 <script src> 加载。）
+  sandbox.CertAi = require(path.join(TOOL, "cert-ai.js"));
 
   const source = fs.readFileSync(path.join(TOOL, "app.js"), "utf8");
   const context = vm.createContext(sandbox);
@@ -368,11 +411,34 @@ if (providerSelect) {
 }
 
 console.log("\n[5] 关键监听已绑定");
-for (const id of ["parseBtn", "generateBtn", "pdfBtn", "cloudSaveBtn", "cloudForgetBtn", "cloudProvider"]) {
+for (const id of ["parseBtn", "pdfBtn", "cloudSaveBtn", "cloudForgetBtn", "cloudProvider"]) {
   const element = app.registry.get(id);
   check(
     id + " 绑定了事件",
     element && (element.hasListener("click") || element.hasListener("change") || element.hasListener("input") || element.hasListener("keydown")),
+  );
+}
+
+// DOCX 下载入口必须不存在：证书一旦发出去就是最终版，源文件可以被随意改动，
+// 不适合交付给学员。反向断言防止以后有人"顺手"把它加回来。
+console.log("\n[5b] 不提供 DOCX 下载入口");
+{
+  const html = require("fs").readFileSync(path.join(TOOL, "index.html"), "utf8");
+  const source = require("fs").readFileSync(path.join(TOOL, "app.js"), "utf8");
+  check("页面没有「生成 ZIP（DOCX）」按钮", !/generateBtn/.test(html));
+  check("app.js 里没有 generateBtn 残留", !/generateBtn/.test(source));
+  check("页面没有「只下载勾选的」按钮", !/downloadSelectedBtn/.test(html));
+  check("app.js 里没有 downloadSelectedBtn 残留", !/downloadSelectedBtn/.test(source));
+  check(
+    "页面没有任何返回 ZIP 的 DOCX 下载入口",
+    !/生成 ZIP/.test(html) && !/下载.*\.docx/i.test(html),
+    "DOCX 只应作为云转换的中间产物，不能给用户",
+  );
+  // 但 DOCX 生成能力本身必须保留 —— 云转换要上传它
+  check(
+    "DOCX 生成逻辑仍在（云转换依赖它）",
+    /buildCertificateItems/.test(source) && /CertCore\.buildDocx/.test(source),
+    "删掉生成能力会让 PDF 转换失效",
   );
 }
 
@@ -383,6 +449,175 @@ if (previewBody) {
   for (const type of ["input", "blur", "keydown", "click", "change"]) {
     check("previewBody 绑定了 " + type, previewBody.hasListener(type));
   }
+}
+
+console.log("\n[7] AI 解析面板");
+const aiProvider = app.registry.get("aiProvider");
+check("找到了 aiProvider 下拉框", Boolean(aiProvider));
+check(
+  "AI 下拉框被填上了选项",
+  aiProvider && aiProvider.children.length >= 2,
+  aiProvider ? "只有 " + aiProvider.children.length + " 个选项" : "元素不存在",
+);
+if (aiProvider && aiProvider.children.length) {
+  const firstAi = aiProvider.children[0];
+  check(
+    "第一个选项是「不用 AI」",
+    firstAi.value === "" && /不用 AI/.test(firstAi.textContent),
+    firstAi.textContent,
+  );
+  check("默认选中「不用 AI」", aiProvider.value === "", "实际 value=" + JSON.stringify(aiProvider.value));
+  const aiIds = aiProvider.children.slice(1).map((option) => option.value);
+  check("列出的服务与模块一致", aiIds.every((id) => app.sandbox.CertAi.getProvider(id)), aiIds.join(", "));
+}
+
+const aiParseBtn = app.registry.get("aiParseBtn");
+check("aiParseBtn 默认禁用（没选服务也没内容）", aiParseBtn && aiParseBtn.disabled === true);
+
+console.log("\n[8] 选中 AI 服务后生成密钥与模型输入框");
+if (aiProvider) {
+  aiProvider.value = "deepseek";
+  aiProvider.dispatch("change");
+
+  const aiFields = app.registry.get("aiFields");
+  const aiInputs = aiFields ? aiFields.querySelectorAll("[data-ai-field]") : [];
+  check("生成了 AI 输入框", aiInputs.length >= 2, "实际 " + aiInputs.length + " 个");
+  const names = aiInputs.map((input) => input.dataset.aiField);
+  check("含 apiKey 字段", names.indexOf("apiKey") >= 0, names.join(","));
+  check("含 model 字段", names.indexOf("model") >= 0, names.join(","));
+  check(
+    "内置服务不需要用户填端点（端点写死在代码里）",
+    names.indexOf("endpoint") < 0,
+    names.join(","),
+  );
+  const keyInput = aiInputs.find((input) => input.dataset.aiField === "apiKey");
+  check("apiKey 是密码类型", keyInput && keyInput.type === "password");
+  const modelInput = aiInputs.find((input) => input.dataset.aiField === "model");
+  check(
+    "模型名预填了 deepseek-flash",
+    modelInput && modelInput.value === "deepseek-flash",
+    modelInput ? modelInput.value : "",
+  );
+
+  // 选了服务但既没文本也没图片 → 仍不可点
+  check("选了服务但没有内容时仍禁用", aiParseBtn.disabled === true);
+
+  // 有文本后应变为可点
+  const quickInput = app.registry.get("quickInput");
+  quickInput.value = "靳睿 南京鼓楼医院 2025-10-10";
+  quickInput.dispatch("input");
+  check(
+    "有文本 + 选了服务后 AI 按钮可点",
+    aiParseBtn.disabled === false,
+    "仍为禁用 —— refreshButtons 的 AI 分支没生效",
+  );
+
+  // 回到「不用 AI」
+  aiProvider.value = "";
+  aiProvider.dispatch("change");
+  check("退回「不用 AI」后 AI 按钮又禁用", aiParseBtn.disabled === true);
+  check(
+    "退回「不用 AI」后输入框被清空",
+    app.registry.get("aiFields").querySelectorAll("[data-ai-field]").length === 0,
+  );
+}
+
+console.log("\n[9] AI 相关监听已绑定");
+for (const id of ["aiProvider", "aiParseBtn", "aiImageInput", "aiImageLabel", "aiClearImageBtn"]) {
+  const element = app.registry.get(id);
+  check(
+    id + " 绑定了事件",
+    element &&
+      (element.hasListener("click") ||
+        element.hasListener("change") ||
+        element.hasListener("drop") ||
+        element.hasListener("dragover") ||
+        element.hasListener("input")),
+  );
+}
+const aiImageLabel = app.registry.get("aiImageLabel");
+check("图片拖放区监听了 dragover（否则拖入会把浏览器拽去打开图片）", aiImageLabel && aiImageLabel.hasListener("dragover"));
+check("图片拖放区监听了 drop", aiImageLabel && aiImageLabel.hasListener("drop"));
+
+console.log("\n[10] PDF 输出方式开关");
+{
+  const toggle = app.registry.get("pdfMergeToggle");
+  const label = app.registry.get("pdfBtnLabel");
+  const html = require("fs").readFileSync(path.join(TOOL, "index.html"), "utf8");
+  const source = require("fs").readFileSync(path.join(TOOL, "app.js"), "utf8");
+
+  check("找到了 pdfMergeToggle", Boolean(toggle));
+  check("找到了 pdfBtnLabel", Boolean(label));
+  check(
+    "HTML 里开关默认不带 checked（默认每人一个独立 PDF）",
+    /<input id="pdfMergeToggle" type="checkbox"\s*\/>/.test(html),
+    "客户要的是每人一个 PDF，默认不能是合并",
+  );
+  check(
+    "HTML 里按钮初始文案说「每人一个」",
+    // 初始文案是 HTML 的职责；桩不解析 HTML 内容，所以这里直接查源码字符串
+    /id="pdfBtnLabel">[^<]*每人一个/.test(html),
+    (html.match(/id="pdfBtnLabel">([^<]*)/) || [])[1] || "没找到",
+  );
+
+  if (toggle) {
+    // 默认状态：桩不解析 HTML 的 checked，这里显式设为 false 模拟真实默认
+    toggle.checked = false;
+    check("默认不勾选", toggle.checked === false);
+
+    toggle.checked = true;
+    toggle.dispatch("change");
+    check(
+      "勾选后文案变成「合并成一本」",
+      label && /合并成一本/.test(label.textContent),
+      label ? label.textContent : "",
+    );
+    toggle.checked = false;
+    toggle.dispatch("change");
+    check(
+      "取消勾选后文案改回「每人一个」",
+      label && /每人一个/.test(label.textContent),
+      label ? label.textContent : "",
+    );
+  }
+
+  // 这两个 id 必须在 els 声明列表里 —— 漏掉的后果是元素永远 undefined，
+  // 而代码里有 `if (els.X)` 保护，于是**静默失效**：开关勾了没用、文案不变，
+  // 页面上没有任何报错。真踩过一次。
+  const declaredBlock = source.match(/\[\s*\n([\s\S]*?)\]\.forEach\(\(id\) =>/);
+  for (const id of ["pdfMergeToggle", "pdfBtnLabel"]) {
+    check(
+      id + " 在 els 声明列表里（漏了会静默失效）",
+      declaredBlock && declaredBlock[1].indexOf('"' + id + '"') >= 0,
+      "只在别处出现不算，必须进声明列表才会被 getElementById 取到",
+    );
+  }
+
+  // app.js 必须把这个开关接到 convertBatch 的 batch 参数上，
+  // 否则开关只是个装饰，勾不勾都走同一条路
+  check(
+    "generatePdf 把开关接到了 convertBatch 的 batch 参数",
+    /batch:\s*wantMerged/.test(source) && /pdfMergeToggle\.checked/.test(source),
+    "开关没接线的话，勾选不会改变输出方式",
+  );
+  check(
+    "默认意图是逐份（wantMerged 来自 checked，未勾选即 false）",
+    /const wantMerged = Boolean\(els\.pdfMergeToggle && els\.pdfMergeToggle\.checked\)/.test(source),
+  );
+
+  // ---- ZIP 打包：自动进行，没有开关 ----
+  // 连续多次下载会被浏览器拦（要用户逐次点"允许"），这不是用户该做的选择，
+  // 所以不做开关、直接打包。这里断言"开关没有被加回来"。
+  check(
+    "没有 ZIP 开关（打包是自动的）",
+    !app.registry.get("pdfZipToggle") && !/pdfZipToggle/.test(html),
+    "ZIP 是技术细节，页面不该出现这个选项",
+  );
+  check(
+    "取不到元素也不会退化成逐个下载（没有依赖开关的分支）",
+    /const shouldZip = files\.length > 1;/.test(source),
+    "打包条件只取决于文件数",
+  );
 }
 
 console.log("\n" + "=".repeat(70));

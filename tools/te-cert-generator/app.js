@@ -23,6 +23,9 @@ const TEMPLATE_TIMEOUT_MS = 15000;
 /** 云转换凭据在本机浏览器里的存放键。只存本机，永不外发到别处。 */
 const CLOUD_STORE_KEY = "te-cert-cloud-credentials-v1";
 
+/** AI 解析设置的存放键（与服务商分开存，互不干扰） */
+const AI_STORE_KEY = "te-cert-ai-settings-v1";
+
 /**
  * 当前页面是不是用 file:// 打开的。
  *
@@ -60,6 +63,14 @@ const state = {
   cloudCredentials: {},
   /** 让用户中途取消云转换 */
   cloudAbort: null,
+  /** AI 解析服务商 id，空串表示未启用 */
+  aiProvider: "",
+  /** AI 解析设置：{ apiKey, model, endpoint } */
+  aiSettings: {},
+  /** 待解析的图片：{ base64, mime, name } */
+  aiImage: null,
+  /** 让用户中途取消 AI 解析 */
+  aiAbort: null,
   /** 编辑中的单元格定位，重渲染后用来恢复焦点与光标 */
   editing: null,
   /** 失焦是否由鼠标点击引起（用来决定要不要整表重绘） */
@@ -73,12 +84,15 @@ document.addEventListener("DOMContentLoaded", () => {
   [
     "quickInput", "parseBtn", "clearInputBtn", "insertSampleBtn", "downloadSampleBtn",
     "fileInput", "fileDropLabel", "fileSummary", "fileName", "fileMeta",
-    "generateBtn", "pdfBtn", "downloadSelectedBtn", "selectedCount", "clearAllBtn",
+    "pdfBtn", "selectedCount", "clearAllBtn",
     "progressBlock", "progressText", "progressPercent", "progressBar",
     "statusFilter", "statTotal", "statReady", "statProblem", "statDuplicate",
     "noticeBar", "emptyState", "tableRegion", "previewBody", "tableFootnote", "addRowBtn",
     "selectAll", "activityPanel", "activityClock", "activityLog", "toastRegion",
     "cloudProvider", "cloudFields", "cloudHelp", "cloudNote", "cloudSaveBtn", "cloudForgetBtn",
+    "pdfMergeToggle", "pdfBtnLabel",
+    "aiProvider", "aiFields", "aiHelp", "aiNote", "aiParseBtn", "aiImageInput", "aiImageLabel",
+    "aiImageSummary", "aiImageName", "aiImageMeta", "aiClearImageBtn",
   ].forEach((id) => {
     els[id] = document.getElementById(id);
   });
@@ -92,6 +106,7 @@ document.addEventListener("DOMContentLoaded", () => {
   }
 
   restoreCloudSettings();
+  restoreAiSettings();
   bindEvents();
   render();
 });
@@ -107,10 +122,13 @@ function bindEvents() {
   });
   els.quickInput.addEventListener("input", () => {
     els.parseBtn.disabled = !els.quickInput.value.trim();
+    // AI 解析按钮的可用性也依赖文本（也接受「只有图片、没有文本」的情况）
+    refreshButtons();
   });
   els.clearInputBtn.addEventListener("click", () => {
     els.quickInput.value = "";
     els.parseBtn.disabled = true;
+    refreshButtons();
     els.quickInput.focus();
   });
   els.insertSampleBtn.addEventListener("click", () => {
@@ -152,9 +170,7 @@ function bindEvents() {
   });
 
   els.statusFilter.addEventListener("change", renderTable);
-  els.generateBtn.addEventListener("click", () => void generate("all"));
   els.pdfBtn.addEventListener("click", () => void generatePdf());
-  els.downloadSelectedBtn.addEventListener("click", () => void generate("selected"));
   els.clearAllBtn.addEventListener("click", clearAll);
   els.addRowBtn.addEventListener("click", addRow);
   els.selectAll.addEventListener("change", () => toggleSelectAll(els.selectAll.checked));
@@ -167,8 +183,66 @@ function bindEvents() {
       renderCloudFields(stored);
       render();
     });
+    // 输出方式开关：按钮文案跟着变，让用户点之前就知道会得到什么
+    if (els.pdfMergeToggle) {
+      els.pdfMergeToggle.addEventListener("change", () => {
+        if (els.pdfBtnLabel) {
+          els.pdfBtnLabel.textContent = els.pdfMergeToggle.checked
+            ? "转换并下载 PDF（合并成一本）"
+            : "转换并下载 PDF（每人一个）";
+        }
+      });
+    }
     els.cloudSaveBtn.addEventListener("click", saveCloudSettings);
     els.cloudForgetBtn.addEventListener("click", forgetCloudSettings);
+  }
+
+  if (els.aiProvider) {
+    els.aiProvider.addEventListener("change", () => {
+      state.aiProvider = els.aiProvider.value;
+      const stored = loadStoredAi();
+      state.aiSettings = (state.aiProvider && stored[state.aiProvider]) || {};
+      renderAiFields(stored);
+      renderAiImageSummary();
+      render();
+    });
+
+    // API Key / 模型名改动时就落盘，并刷新按钮可用性
+    els.aiFields.addEventListener("input", () => {
+      try {
+        state.aiSettings = collectAiSettings();
+      } catch {
+        state.aiSettings = state.aiSettings || {};
+      }
+      persistAi();
+      refreshButtons();
+    });
+
+    els.aiImageInput.addEventListener("change", (event) => {
+      const file = event.target.files && event.target.files[0];
+      if (file) void loadAiImage(file);
+    });
+    // 拖放：与 CSV 导入同一套交互，但要 preventDefault 否则浏览器会直接打开图片
+    ["dragover", "dragenter"].forEach((name) => {
+      els.aiImageLabel.addEventListener(name, (event) => {
+        event.preventDefault();
+        els.aiImageLabel.classList.add("is-dragging");
+      });
+    });
+    ["dragleave", "dragend"].forEach((name) => {
+      els.aiImageLabel.addEventListener(name, () => {
+        els.aiImageLabel.classList.remove("is-dragging");
+      });
+    });
+    els.aiImageLabel.addEventListener("drop", (event) => {
+      event.preventDefault();
+      els.aiImageLabel.classList.remove("is-dragging");
+      const file = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0];
+      if (file) void loadAiImage(file);
+    });
+
+    els.aiClearImageBtn.addEventListener("click", clearAiImage);
+    els.aiParseBtn.addEventListener("click", () => void runAiParse());
   }
 
   document.querySelectorAll('input[name="template"]').forEach((input) => {
@@ -589,12 +663,35 @@ function refreshButtons() {
   // PDF 走云转换，所以还要求先选好服务商；没选就不让点，避免点了才发现没配
   const cloudReady = Boolean(state.cloudProvider && window.CertCloud);
   els.pdfBtn.disabled = state.generating || ready === 0 || !cloudReady;
-  els.generateBtn.disabled = state.generating || ready === 0;
-  els.downloadSelectedBtn.disabled = state.generating || state.selected.size === 0;
   els.clearAllBtn.disabled = state.generating || state.records.length === 0;
   els.addRowBtn.disabled = state.generating;
   els.selectAll.disabled = ready === 0;
-  els.selectedCount.textContent = String(state.selected.size);
+
+  // 勾选数显示在表格底部：它决定「转全部」还是「只转勾选的」，得让用户看得见
+  if (els.selectedCount) {
+    els.selectedCount.textContent = state.selected.size
+      ? `已勾选 ${state.selected.size} 条（将只转换这些）`
+      : "未勾选（将转换全部可生成的）";
+  }
+
+  // AI 解析：选了服务、且（有文本或有图片）才可点。
+  // 与 PDF 按钮同样的思路 —— 配置不全时先禁用，而不是点了才报错。
+  if (els.aiParseBtn) {
+    const hasContent = Boolean(els.quickInput.value.trim() || state.aiImage);
+    const aiReady = Boolean(state.aiProvider && window.CertAi && hasContent);
+    els.aiParseBtn.disabled = state.generating || !aiReady;
+    els.aiClearImageBtn.disabled = state.generating || !state.aiImage;
+  }
+}
+
+/** FileReader 的 Promise 封装，供 AI 图片读取用。 */
+function readAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(new Error("图片读取失败。"));
+    reader.readAsDataURL(file);
+  });
 }
 
 function refreshSelectAll() {
@@ -636,6 +733,15 @@ function statusBadge(record) {
     const hint = document.createElement("small");
     hint.textContent = record.issues.join("；");
     wrap.appendChild(hint);
+  }
+  // AI 的疑问备注单独一行显示。刻意不并进 issues —— issues 表示「不合法」，
+  // 而 note 只是「模型不确定」，语义不同；混在一起会让用户以为这条不能用。
+  // 但也不能不显示：证书印错名字不可挽回，这是人工核对的唯一线索。
+  if (record.aiNote) {
+    const note = document.createElement("small");
+    note.className = "ai-note";
+    note.textContent = "AI 存疑：" + record.aiNote;
+    wrap.appendChild(note);
   }
   return wrap;
 }
@@ -1033,6 +1139,282 @@ function forgetCloudSettings() {
   showToast("已清除本机保存的密钥。");
 }
 
+/* ------------------------------------------------------------ AI 解析设置 */
+
+/**
+ * AI 是「增强」不是「替代」：规则解析仍是默认路径（免费、离线、可预测）。
+ * 只有规则解析失败、或输入是图片时才需要它。
+ * 与云转换一致：默认不选服务商 = 不联网；密钥只存本机 localStorage。
+ */
+function loadStoredAi() {
+  try {
+    const raw = localStorage.getItem(AI_STORE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function persistAi() {
+  try {
+    const all = loadStoredAi();
+    if (state.aiProvider && state.aiSettings) {
+      all[state.aiProvider] = state.aiSettings;
+      localStorage.setItem(AI_STORE_KEY, JSON.stringify(all));
+    }
+  } catch {
+    /* 隐私模式下不可写，降级为本次会话有效 */
+  }
+}
+
+function restoreAiSettings() {
+  if (!window.CertAi || !els.aiProvider) return;
+
+  els.aiProvider.innerHTML = "";
+  const none = document.createElement("option");
+  none.value = "";
+  none.textContent = "不用 AI（仅用规则解析）";
+  els.aiProvider.appendChild(none);
+  window.CertAi.PROVIDERS.forEach((provider) => {
+    const option = document.createElement("option");
+    option.value = provider.id;
+    option.textContent = provider.label;
+    els.aiProvider.appendChild(option);
+  });
+
+  const stored = loadStoredAi();
+  // 默认「不用 AI」：不能在用户没明确同意前把名单发出去
+  const first = window.CertAi.PROVIDERS[0];
+  state.aiProvider = "";
+  state.aiSettings = {};
+  els.aiProvider.value = "";
+  renderAiFields(Object.assign({}, stored, first ? { [first.id]: stored[first.id] || {} } : {}));
+  renderAiImageSummary();
+}
+
+function renderAiFields(stored) {
+  if (!els.aiFields || !window.CertAi) return;
+  els.aiFields.textContent = "";
+
+  const provider = window.CertAi.getProvider(state.aiProvider);
+  if (!provider) {
+    els.aiHelp.textContent = "";
+    if (els.aiNote) {
+      els.aiNote.textContent = "默认不联网。规则解析免费、离线，覆盖日常绝大多数写法。";
+    }
+    refreshButtons();
+    return;
+  }
+
+  const saved = (stored && stored[provider.id]) || state.aiSettings || {};
+
+  const addField = (name, label, placeholder, value, secret) => {
+    const wrap = document.createElement("label");
+    wrap.className = "cloud-field";
+    const caption = document.createElement("span");
+    caption.textContent = label;
+    const input = document.createElement("input");
+    input.type = secret ? "password" : "text";
+    input.dataset.aiField = name;
+    input.placeholder = placeholder || "";
+    input.autocomplete = "off";
+    input.spellcheck = false;
+    input.value = value || "";
+    wrap.appendChild(caption);
+    wrap.appendChild(input);
+    els.aiFields.appendChild(wrap);
+  };
+
+  addField("apiKey", "API Key", provider.keyPlaceholder, saved.apiKey, true);
+  addField("model", "模型名", provider.defaultModel || "例如 deepseek-flash", saved.model || provider.defaultModel, false);
+  // 「其它 OpenAI 兼容接口」需要手填地址
+  if (!provider.endpoint) {
+    addField("endpoint", "接口地址", "https://…/v1/chat/completions", saved.endpoint, false);
+  }
+
+  els.aiHelp.textContent = provider.help || "";
+  if (els.aiNote) {
+    els.aiNote.textContent =
+      "⚠ 点「AI 解析」会把左侧文本与所选图片发送给 " +
+      provider.label +
+      "。图片尤其注意：签到表上往往还有别的信息。" +
+      "抽取结果会逐条过校验，缺项红标，但**请务必对着原图核对姓名**。";
+  }
+  refreshButtons();
+}
+
+/** 从输入框收集 AI 设置。缺 Key 或缺模型名时报错，不带半份配置去发请求。 */
+function collectAiSettings() {
+  const provider = window.CertAi.getProvider(state.aiProvider);
+  if (!provider) return null;
+  const settings = {};
+  els.aiFields.querySelectorAll("[data-ai-field]").forEach((input) => {
+    settings[input.dataset.aiField] = input.value.trim();
+  });
+  if (!settings.apiKey) throw new Error("请先填写 API Key。");
+  if (!settings.model) settings.model = provider.defaultModel;
+  if (!settings.model) throw new Error("请先填写模型名。");
+  // 用默认端点的服务商，不需要用户填地址
+  if (provider.endpoint) settings.endpoint = provider.endpoint;
+  if (!settings.endpoint) throw new Error("请先填写接口地址。");
+  return settings;
+}
+
+/** 把 File 读成 { base64, mime, name }，本地先做格式与体积检查。 */
+async function loadAiImage(file) {
+  try {
+    const image = await window.CertAi.readImageFile(file, readAsDataUrl);
+    state.aiImage = image;
+    renderAiImageSummary();
+    render();
+    setNotice("已选择图片「" + image.name + "」，点「AI 解析」开始识别。", "success");
+  } catch (error) {
+    state.aiImage = null;
+    els.aiImageInput.value = "";
+    renderAiImageSummary();
+    render();
+    setNotice(error.message, "error");
+    showToast(error.message, "error");
+  }
+}
+
+function clearAiImage() {
+  state.aiImage = null;
+  els.aiImageInput.value = "";
+  renderAiImageSummary();
+  render();
+  setNotice("已移除图片。");
+}
+
+function renderAiImageSummary() {
+  if (!els.aiImageSummary) return;
+  const image = state.aiImage;
+  els.aiImageSummary.classList.toggle("is-empty", !image);
+  els.aiImageName.textContent = image ? image.name : "尚未选择图片";
+  els.aiImageMeta.textContent = image
+    ? image.mime.replace("image/", "").toUpperCase()
+    : "";
+}
+
+/**
+ * 用 AI 抽取名单，并把结果按与规则解析**相同的语义**并入表格。
+ *
+ * 追加而不是覆盖：与「解析到表格」一致，表格已有内容时新记录接在后面。
+ * 反过来说，重新解析不会清掉用户手改过的行 —— 这一点必须保持一致，
+ * 否则用户改完再点一次 AI 就白改了。
+ */
+async function runAiParse() {
+  if (state.generating) return;
+
+  if (!window.CertAi) {
+    setNotice("AI 解析模块未加载，请刷新页面。", "error");
+    return;
+  }
+  if (!state.aiProvider) {
+    setNotice("请先在「交给 AI 解析」里选择一个服务。默认不联网。", "warn");
+    showToast("请先选择 AI 服务。", "error");
+    els.aiProvider.focus();
+    return;
+  }
+
+  let settings;
+  try {
+    settings = collectAiSettings();
+  } catch (error) {
+    setNotice(error.message, "error");
+    showToast(error.message, "error");
+    return;
+  }
+  state.aiSettings = settings;
+  persistAi();
+
+  const text = els.quickInput.value.trim();
+  if (!text && !state.aiImage) {
+    setNotice("没有可解析的内容：请填文本，或选一张名单图片。", "error");
+    showToast("请先填文本或选图片。", "error");
+    return;
+  }
+
+  const provider = window.CertAi.getProvider(state.aiProvider);
+  state.generating = true;
+  state.aiAbort = new AbortController();
+  render();
+  setProgress(0, 1, "准备中");
+  logActivity(`开始 AI 解析（${provider.label}${state.aiImage ? "，含图片" : ""}）`);
+
+  try {
+    const result = await window.CertAi.extractRecords({
+      text: text,
+      image: state.aiImage,
+      apiKey: settings.apiKey,
+      model: settings.model,
+      endpoint: settings.endpoint,
+      core: window.CertCore,
+      signal: state.aiAbort.signal,
+      onStage: (stage) => setProgress(0, 1, stage),
+    });
+
+    if (!result.records.length) {
+      throw new Error(
+        result.unreadable
+          ? "没有抽出任何记录：" + result.unreadable
+          : "没有抽出任何记录。请确认内容里确实有姓名，或换一张更清晰的图片。",
+      );
+    }
+
+    // 与规则解析相同的合并语义：追加、重排行号、重算输出文件名、只勾选可生成的
+    const appended = state.records.length > 0;
+    const offset = appended ? state.nextLineNo - 1 : 0;
+    const incoming = result.records.map((record) => {
+      record.lineNo += offset;
+      return record;
+    });
+    const records = appended ? state.records.concat(incoming) : incoming;
+    window.CertCore.assignOutputNames(records);
+    state.records = records;
+    state.nextLineNo = records.length + 1;
+    state.source = "ai";
+    incoming.forEach((record) => {
+      if (record.status === "ready") state.selected.add(record.lineNo);
+    });
+
+    resetProgress();
+    render();
+
+    const noted = incoming.filter((record) => record.aiNote).length;
+    const notes = [];
+    if (result.unreadable) notes.push(result.unreadable);
+    if (noted) notes.push(`${noted} 条 AI 标了存疑，请重点核对`);
+    reportParseResult(incoming, notes);
+
+    logActivity(
+      `AI 解析完成：新增 ${incoming.length} 条` +
+        (appended ? `（原有 ${records.length - incoming.length} 条保留）` : "") +
+        (result.usage ? `，用了 ${result.usage.total_tokens || "?"} tokens` : ""),
+    );
+    if (noted) {
+      setNotice(
+        `AI 抽出 ${incoming.length} 条，其中 ${noted} 条模型自己标了存疑 —— ` +
+          "请对着原文/原图逐条核对姓名后再生成。",
+        "warn",
+      );
+    }
+  } catch (error) {
+    resetProgress();
+    const message =
+      error && error.name === "AbortError" ? "已取消 AI 解析。" : error.message || "AI 解析失败。";
+    setNotice(message, "error");
+    showToast(message, "error");
+    logActivity("AI 解析失败：" + message);
+  } finally {
+    state.generating = false;
+    state.aiAbort = null;
+    render();
+  }
+}
+
 /* -------------------------------------------------------- 生成与下载 DOCX */
 
 /** 让出一帧给界面刷新。requestAnimationFrame 在后台标签页/无头环境可能不触发，
@@ -1050,80 +1432,6 @@ function nextFrame() {
   });
 }
 
-async function generate(scope) {
-  if (state.generating || !state.records.length) return;
-
-  const targets = state.records.filter((record) => {
-    if (record.status !== "ready") return false;
-    return scope === "selected" ? state.selected.has(record.lineNo) : true;
-  });
-  if (!targets.length) {
-    showToast(scope === "selected" ? "还没有勾选任何可生成的记录。" : "没有可生成的记录。", "error");
-    return;
-  }
-
-  const meta = window.CertCore.TEMPLATES[state.template];
-  state.generating = true;
-  render();
-  setProgress(0, targets.length, "正在读取模板…");
-  logActivity(`开始生成 ${targets.length} 份证书（${meta.label}）`);
-
-  try {
-    const templateBytes = await loadTemplate(state.template);
-    const entries = [];
-    const failed = [];
-
-    for (let index = 0; index < targets.length; index += 1) {
-      const record = targets[index];
-      try {
-        const bytes = await window.CertCore.buildDocx(templateBytes, {
-          name: record.name,
-          hospital: record.hospital,
-          year: record.date.year,
-          month: record.date.month,
-          day: record.date.day,
-        });
-        entries.push({ name: record.outputName, data: bytes });
-      } catch (error) {
-        failed.push({ record, message: error.message || String(error) });
-      }
-      if (index % 5 === 0 || index === targets.length - 1) {
-        setProgress(index + 1, targets.length, `正在生成 ${index + 1} / ${targets.length}`);
-        await nextFrame();
-      }
-    }
-
-    if (!entries.length) {
-      throw new Error("所有记录都生成失败了，请检查模板文件是否完整。");
-    }
-
-    setProgress(targets.length, targets.length, "正在打包 ZIP…");
-    await nextFrame();
-    const zip = await window.CertCore.writeZip(entries);
-    triggerDownload(new Blob([zip], { type: "application/zip" }), `TE操作培训证书_${timestamp()}.zip`);
-
-    resetProgress();
-    const duplicateCount = targets.filter((record) => record.fileNameDuplicated).length;
-    logActivity(`已下载 ${entries.length} 份证书，ZIP 约 ${formatBytes(zip.length)}`);
-    failed.forEach((item) => logActivity(`跳过 ${item.record.name || "（无姓名）"}：${item.message}`));
-    setNotice(
-      `已生成 ${entries.length} 份证书并打包下载` +
-        (failed.length ? `，${failed.length} 份失败已记录在下方` : "") +
-        (duplicateCount ? `；同名证书已用 _2、_3 区分文件名` : "") +
-        "。",
-      failed.length ? "warn" : "success",
-    );
-    showToast(`已下载 ${entries.length} 份证书。`, failed.length ? "error" : "success");
-  } catch (error) {
-    resetProgress();
-    setNotice(error.message || "生成失败。", "error");
-    showToast(error.message || "生成失败。", "error");
-    logActivity("生成失败：" + (error.message || error));
-  } finally {
-    state.generating = false;
-    render();
-  }
-}
 
 function timestamp() {
   const now = new Date();
@@ -1165,14 +1473,13 @@ function printableRecords() {
 }
 
 /**
- * 逐份生成证书 docx，并顺带取出 document.xml。
+ * 逐份生成证书 docx。
  *
- * 两个都要：
- *   docx        —— 逐份转换时上传这个
- *   documentXml —— 合批时要把各份的 <w:body> 拼起来，zip 字节里拿不到
- * 取 document.xml 必须走 readZip，所以这一步是异步的。
+ * needDocumentXml 决定要不要顺带取出 document.xml：
+ *   逐份转换（默认）只需要 docx；只有合批才需要 document.xml 去拼多页文档。
+ *   多一步 unzip 就多一分开销，默认模式下不做无用的解析。
  */
-async function buildCertificateItems(targets, templateBytes, onTick) {
+async function buildCertificateItems(targets, templateBytes, needDocumentXml, onTick) {
   const items = [];
   const failed = [];
   for (let index = 0; index < targets.length; index += 1) {
@@ -1185,10 +1492,19 @@ async function buildCertificateItems(targets, templateBytes, onTick) {
         month: record.date.month,
         day: record.date.day,
       });
-      const entries = await window.CertCore.readZip(docx);
-      const entry = entries.find((item) => item.name === "word/document.xml");
-      if (!entry) throw new Error("生成的 docx 缺少 word/document.xml");
-      items.push({ name: record.name, docx: docx, documentXml: entry.data });
+      const item = {
+        name: record.name,
+        docx: docx,
+        // 文件名带姓名：客户要的是「每人一个 PDF」，同名重复靠 outputName 的 _2/_3 区分
+        fileName: (record.fileBase || "TE操作培训证书_" + record.name) + ".pdf",
+      };
+      if (needDocumentXml) {
+        const entries = await window.CertCore.readZip(docx);
+        const entry = entries.find((each) => each.name === "word/document.xml");
+        if (!entry) throw new Error("生成的 docx 缺少 word/document.xml");
+        item.documentXml = entry.data;
+      }
+      items.push(item);
     } catch (error) {
       failed.push({ record: record, message: error.message || String(error) });
     }
@@ -1251,19 +1567,30 @@ async function generatePdf() {
 
   const provider = window.CertCloud.getProvider(state.cloudProvider);
   const meta = window.CertCore.TEMPLATES[state.template];
+  // 默认逐份：证书是发给个人的，每人拿到自己那张 TE操作培训证书_姓名.pdf。
+  // 合成一本再发下去，收件人还得自己找自己那页 —— 实际使用中不接受。
+  const wantMerged = Boolean(els.pdfMergeToggle && els.pdfMergeToggle.checked);
   state.generating = true;
   state.cloudAbort = new AbortController();
   render();
   setProgress(0, list.length, "正在生成证书…");
-  logActivity(`开始云端转 PDF（${provider.label}，${list.length} 份，${meta.label}）`);
+  logActivity(
+    `开始云端转 PDF（${provider.label}，${list.length} 份，${meta.label}，` +
+      (wantMerged ? "合并为一份多页 PDF）" : "每人一个独立 PDF）"),
+  );
 
   try {
     const templateBytes = await loadTemplate(state.template);
-    const built = await buildCertificateItems(list, templateBytes, (done, total) => {
-      if (done % 3 === 0 || done === total) {
-        setProgress(done, total, `正在生成证书 ${done} / ${total}`);
-      }
-    });
+    const built = await buildCertificateItems(
+      list,
+      templateBytes,
+      wantMerged, // 只有合批才需要 document.xml
+      (done, total) => {
+        if (done % 3 === 0 || done === total) {
+          setProgress(done, total, `正在生成证书 ${done} / ${total}`);
+        }
+      },
+    );
     built.failed.forEach((item) =>
       logActivity(`跳过 ${item.record.name || "（无姓名）"}：${item.message}`),
     );
@@ -1273,7 +1600,7 @@ async function generatePdf() {
       items: built.items,
       providerId: state.cloudProvider,
       credentials: credentials,
-      batch: true,
+      batch: wantMerged,
       readZip: window.CertCore.readZip,
       writeZip: window.CertCore.writeZip,
       signal: state.cloudAbort.signal,
@@ -1295,28 +1622,57 @@ async function generatePdf() {
 
     setProgress(list.length, list.length, "正在保存…");
     let savedBytes = 0;
-    result.pdfList.forEach((item, index) => {
+    const files = result.pdfList.map((item, index) => {
       savedBytes += item.bytes.length;
-      const suffix = result.pdfList.length > 1 ? `_${index + 1}` : "";
-      triggerDownload(
-        new Blob([item.bytes], { type: "application/pdf" }),
-        `TE操作培训证书_${timestamp()}${suffix}.pdf`,
-      );
+      // 逐份时用带姓名的文件名（客户就是按姓名分发的）；
+      // 合批产物是一本合订本，退回带时间戳的统称文件名。
+      return {
+        name: result.batched
+          ? `TE操作培训证书_${list.length}份_${timestamp()}.pdf`
+          : item.fileName || `TE操作培训证书_${item.name || timestamp()}_${index + 1}.pdf`,
+        data: item.bytes,
+      };
     });
+
+    // 多文件一律打包成 ZIP：连续触发多次下载会被浏览器拦（要用户逐次点"允许"），
+    // 还得逐个确认保存位置。这不是用户该做的选择，所以不做开关、直接打包。
+    // 单文件没必要打包，省掉一次解压。
+    const shouldZip = files.length > 1;
+    let zipBytes = 0;
+    if (shouldZip) {
+      await nextFrame();
+      const zipEntries = files.map((file) => ({ name: file.name, data: file.data }));
+      const zip = await window.CertCore.writeZip(zipEntries);
+      zipBytes = zip.length;
+      triggerDownload(
+        new Blob([zip], { type: "application/zip" }),
+        `TE操作培训证书_${timestamp()}.zip`,
+      );
+    } else {
+      files.forEach((file) => {
+        triggerDownload(new Blob([file.data], { type: "application/pdf" }), file.name);
+      });
+    }
 
     resetProgress();
     const okCount = result.batched ? list.length - built.failed.length : result.pdfList.length;
     logActivity(
-      `已下载 PDF：${result.pdfList.length} 个文件，共约 ${formatBytes(savedBytes)}` +
-        (result.batched ? "（合并为一份多页 PDF）" : "（逐份 PDF）"),
+      `已下载 PDF：${files.length} 个文件，共约 ${formatBytes(savedBytes)}` +
+        (shouldZip ? `，打包为 ZIP（${formatBytes(zipBytes)}）` : "") +
+        (result.batched ? "（合并为一份多页 PDF）" : "（每人一个独立 PDF）"),
     );
     setNotice(
-      `已生成 ${result.pdfList.length} 个 PDF 文件（覆盖 ${okCount} 份证书，${formatBytes(savedBytes)}）` +
-        (result.batched ? "，已合并为一份多页 PDF。" : "。") +
+      `已生成 ${files.length} 个 PDF（覆盖 ${okCount} 份证书，共 ${formatBytes(savedBytes)}）` +
+        (shouldZip
+          ? `，打包为 ZIP（${formatBytes(zipBytes)}）下载，解压后每人一个带姓名的 PDF。`
+          : "，已下载。") +
         (result.failed.length ? ` ${result.failed.length} 条失败已记录在下方。` : ""),
       result.failed.length ? "warn" : "success",
     );
-    showToast(`PDF 已下载：${result.pdfList.length} 个文件。`, result.failed.length ? "error" : "success");
+    showToast(
+      shouldZip ? "PDF 已打包下载：" + files.length + " 个文件。" : "PDF 已下载。",
+      result.failed.length ? "error" : "success",
+    );
   } catch (error) {
     resetProgress();
     const message = error && error.name === "AbortError" ? "已取消转换。" : error.message || "转换失败。";

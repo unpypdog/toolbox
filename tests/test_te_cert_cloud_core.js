@@ -360,6 +360,489 @@ function testDate() {
   check("空日期抛错", threw);
 }
 
+/* ------------------------------------------------------------- 6. AI 抽取 */
+
+function testAiExtraction() {
+  console.log("\n[6] AI 抽取：请求形状与校验复用");
+
+  const ai = require(path.join(TOOL, "cert-ai.js"));
+
+  // ---- 请求体形状：错了只会在运行时炸，而这里没有真实 key 可测 ----
+  const textBody = ai.buildRequestBody({ text: "靳睿 南京鼓楼医院 2025-10-10", model: "deepseek-flash" });
+  equal("model 透传", textBody.model, "deepseek-flash");
+  equal("用 json 输出模式", textBody.response_format.type, "json_object");
+  equal("不用流式", textBody.stream, false);
+  equal("temperature 归零（抽取要稳定）", textBody.temperature, 0);
+  equal("两条消息：system + user", textBody.messages.length, 2);
+  equal("system 放提示词", textBody.messages[0].role, "system");
+  equal("user 是消息数组的第二个", textBody.messages[1].role, "user");
+  check("纯文本时 user content 是字符串", typeof textBody.messages[1].content === "string");
+
+  // 官方要求：JSON Output 必须让提示词里出现 "json" 字样并给出格式示例
+  check("提示词里出现了 json 字样", /json/i.test(ai.PROMPT));
+  check("提示词给了字段示例", /"records"/.test(ai.PROMPT));
+  check("提示词明确要求逐字照抄、不许补全", /照抄|不要补全|不要猜/.test(ai.PROMPT));
+
+  // ---- 图片：必须放在 user 消息里（放 system/assistant 会被 400 拒绝）----
+  const image = { base64: "AAAA", mime: "image/jpeg", name: "x.jpg" };
+  const imgBody = ai.buildRequestBody({ text: "", image: image, model: "deepseek-flash" });
+  const content = imgBody.messages[1].content;
+  check("带图片时 user content 变成数组", Array.isArray(content));
+  const parts = content.filter((part) => part.type);
+  check("含 text 块", parts.some((part) => part.type === "text"));
+  const imagePart = parts.find((part) => part.type === "image_url");
+  check("含 image_url 块", Boolean(imagePart));
+  check(
+    "图片走 base64 data URL",
+    imagePart && /^data:image\/jpeg;base64,AAAA$/.test(imagePart.image_url.url),
+    imagePart ? imagePart.image_url.url.slice(0, 40) : "",
+  );
+  check(
+    "system 消息里没有图片（会被接口 400 拒绝）",
+    typeof imgBody.messages[0].content === "string",
+  );
+
+  // ---- 图片 + 文字混合：最常见的真实用法是「图片放名单、文字写医院和日期」----
+  // 提示词不把合并规则讲清楚，模型会把它当成两批人，产出一堆重复记录或
+  // 把「南京鼓楼医院」当成一个人名。这些断言就是钉这条规则的。
+  console.log("  --- 图 + 文混合（合并成同一个名单）---");
+  const mixed = ai.buildRequestBody({
+    text: "这几个人是南京鼓楼医院的，日期 2025年10月10日",
+    image: image,
+    model: "deepseek-flash",
+  });
+  const mixedContent = mixed.messages[1].content;
+  check("混合输入时 user content 仍是数组", Array.isArray(mixedContent));
+  check(
+    "同时含文字块与图片块",
+    mixedContent.some((part) => part.type === "text") &&
+      mixedContent.some((part) => part.type === "image_url"),
+  );
+  const mixedText = (mixedContent.find((part) => part.type === "text") || {}).text || "";
+  check("user 消息里带上了用户输入的原文", mixedText.indexOf("南京鼓楼医院") >= 0);
+  check(
+    "user 消息点明了「图片是名单、文字是补充」的分工",
+    /图片/.test(mixedText) && /文字/.test(mixedText) && /合并/.test(mixedText),
+    mixedText.slice(0, 80),
+  );
+  check(
+    "user 消息明确要求「同一个人不要算两条」",
+    /不要[\s\S]{0,20}算两条/.test(mixedText) || /不要[\s\S]{0,12}重复/.test(mixedText),
+    mixedText.slice(-90),
+  );
+
+  check(
+    "system 提示词说明了医院/日期要套用到每一位",
+    /套用/.test(ai.PROMPT),
+    "缺这条规则，模型会把医院名当成独立记录或只给第一个人",
+  );
+  check(
+    "system 提示词禁止把医院/日期单独生成记录",
+    /不要[\s\S]{0,20}单独生成一条记录/.test(ai.PROMPT),
+    ai.PROMPT.slice(ai.PROMPT.indexOf("绝对不要") - 20, ai.PROMPT.indexOf("绝对不要") + 60),
+  );
+  check(
+    "system 提示词给了「图片姓名 + 文字医院日期」的示例",
+    /示例二/.test(ai.PROMPT) && /3 条记录/.test(ai.PROMPT),
+  );
+  check(
+    "system 提示词要求姓名以图片为主要来源",
+    // 提示词里用 markdown 粗体标注了关键词（**图片**），正则要容下那对星号
+    /姓名以\**图片\**为(主要)?来源/.test(ai.PROMPT),
+    ai.PROMPT.slice(ai.PROMPT.indexOf("姓名以"), ai.PROMPT.indexOf("姓名以") + 40),
+  );
+  check(
+    "system 提示词要求医院/日期以文字为准",
+    // 措辞从"以文字为主要来源"升级成了更强的"优先级最高、无条件覆盖"——
+    // 因为"主要来源"留了余地，模型会去比较两个日期、取年份更小的那个（真踩过）
+    /优先级[\s\S]{0,10}最高/.test(ai.PROMPT) && /无条件覆盖/.test(ai.PROMPT),
+    ai.PROMPT.slice(ai.PROMPT.indexOf("谁说了算"), ai.PROMPT.indexOf("谁说了算") + 60),
+  );
+
+  // 只有图片时不应出现「文字」相关的措辞
+  const imgOnly = ai.buildRequestBody({ text: "", image: image, model: "deepseek-flash" });
+  const imgOnlyText = imgOnly.messages[1].content.find((p) => p.type === "text").text;
+  check(
+    "只给图片时不出现「合并文字」的措辞",
+    !/补充说明/.test(imgOnlyText),
+    imgOnlyText,
+  );
+
+  // 文本两端空白不应影响判断（否则会被当成"有文字"）
+  const blank = ai.buildRequestBody({ text: "   \n  ", image: image, model: "deepseek-flash" });
+  const blankText = blank.messages[1].content.find((p) => p.type === "text").text;
+  check("纯空白文本按「只给图片」处理", !/补充说明/.test(blankText), JSON.stringify(blankText.slice(0, 40)));
+
+  // ---- 提示词里绝对不能出现具体日期／机构名 ----
+  // 这是真踩过的坑：示例里写了「南京鼓楼医院 2025年10月10日」，模型把示例日期
+  // 当成真实信息套到了用户的数据上，产出一批日期错误的记录。
+  // 示例必须用占位符，不能有可被照抄的真实值。
+  console.log("  --- 提示词不能被示例数据污染 ---");
+  const leakedDates = (ai.PROMPT.match(/\d{4}[-年]\d{1,2}[-月]\d{1,2}/g) || []);
+  check(
+    "提示词里没有任何具体日期（防示例泄漏）",
+    leakedDates.length === 0,
+    "发现: " + JSON.stringify(leakedDates) + " —— 模型会把示例日期当成真实数据照抄",
+  );
+  check(
+    "提示词里没有具体机构名（示例已换成占位符）",
+    ["南京鼓楼医院", "北京协和医院", "上海市第六人民医院"].every(
+      (name) => ai.PROMPT.indexOf(name) < 0,
+    ),
+    "示例里写具体医院名会被照抄到结果里",
+  );
+  check(
+    "提示词声明了具体值都是占位符",
+    /占位符/.test(ai.PROMPT) && /不要照抄/.test(ai.PROMPT),
+  );
+  check(
+    "JSON 示例仍然合法（占位符在引号内）",
+    (() => {
+      const lines = ai.PROMPT.split("\n");
+      const jsonLine = lines.find((line) => line.indexOf('{"records"') === 0);
+      if (!jsonLine) return false;
+      try {
+        JSON.parse(jsonLine);
+        return true;
+      } catch {
+        return false;
+      }
+    })(),
+    "示例 json 不能被改成解析不了的形态，否则模型学不到格式",
+  );
+
+  // ---- 优先级：文字 > 图片。这条比"少抽一个人"更重要 ----
+  console.log("  --- 文字里的日期必须无条件覆盖图片 ---");
+  check(
+    "提示词写明文字优先级最高",
+    /优先级[\s\S]{0,6}最高|无条件覆盖/.test(ai.PROMPT),
+    "只写「以文字为主要来源」不够 —— 模型会去比较两个日期、取年份更小的那个",
+  );
+  check(
+    "提示词要求忽略图片上印的日期",
+    /一律[\s\S]{0,4}忽略|不要[\s\S]{0,10}比较/.test(ai.PROMPT),
+    "模板/往期证书上常印着日期，不明确禁止就会被当成真数据",
+  );
+  check(
+    "提示词明确不许在 note 里质疑文字里写死的字段",
+    /不算不确定|不要在 note 里质疑/.test(ai.PROMPT),
+    "否则每条都会挂一句「日期待核对」，用户没法分辨哪些真的需要核对",
+  );
+  check(
+    "user 消息里也重申了「文字为准、无条件覆盖」",
+    /无条件覆盖/.test(mixedText) || /以文字为准/.test(mixedText),
+    mixedText.slice(-80),
+  );
+
+  // ---- extractJsonText：官方明确说 JSON Output 偶尔返回空内容 ----
+  let message = "";
+  try {
+    ai.extractJsonText({ choices: [{ message: { content: "" } }] });
+  } catch (error) {
+    message = error.message;
+  }
+  check("空内容给出可操作提示（而不是 JSON.parse 报错）", /空内容|重试/.test(message), message);
+
+  message = "";
+  try {
+    ai.extractJsonText({ choices: [{ message: { content: "  " }, finish_reason: "length" }] });
+  } catch (error) {
+    message = error.message;
+  }
+  check("截断时提示分批", /截断|长度/.test(message), message);
+
+  equal(
+    "能剥掉 markdown 代码块",
+    ai.extractJsonText({ choices: [{ message: { content: "```json\n{\"a\":1}\n```" } }] }),
+    '{"a":1}',
+  );
+
+  // ---- normalize：必须复用 core 的校验，不能自己写一套 ----
+  const good = ai.normalize(
+    { records: [{ name: "靳睿", hospital: "南京鼓楼医院", date: "2025-10-10", note: "" }] },
+    core,
+  );
+  equal("正常记录可生成", good.records[0].status, "ready");
+  equal("dateRaw 按 core 约定填充", good.records[0].dateRaw, "2025-10-10");
+  check("解析出了 date 对象", Boolean(good.records[0].date));
+  equal("date 的年份", good.records[0].date && good.records[0].date.year, "2025");
+
+  // 这一条是最容易写错的地方：core.validateRecord 读的是 dateRaw 而不是 dateText。
+  // 传错字段名会让所有记录都报「缺少颁发日期」——看起来像"AI 没抽到日期"，
+  // 实际是适配层写错了。用断言钉死。
+  const wrongField = core.validateRecord({ name: "甲", hospital: "乙医院", dateText: "2025-10-10" });
+  check(
+    "反证：传给 validateRecord 的字段必须是 dateRaw（写成 dateText 会误报）",
+    wrongField.issues.indexOf("缺少颁发日期") >= 0,
+    "这条断言是给适配层立的规矩，如果它不再成立说明 core 改了契约",
+  );
+
+  console.log("  --- 缺项必须标红，绝不静默通过 ---");
+  const bad = ai.normalize(
+    {
+      records: [
+        { name: "", hospital: "某医院", date: "2025-10-10" },
+        { name: "张三", hospital: "", date: "2025-10-10" },
+        { name: "李四", hospital: "某医院", date: "" },
+        { name: "王五", hospital: "某医院", date: "不是日期" },
+        { name: "赵六", hospital: "某医院", date: "2025-13-45" },
+      ],
+    },
+    core,
+  );
+  check(
+    "5 条缺项/异常输入全部标为需处理",
+    bad.records.length === 5 && bad.records.every((r) => r.status === "invalid"),
+    bad.records.map((r) => r.status).join(","),
+  );
+  check(
+    "每条都给出了具体原因",
+    bad.records.every((r) => r.issues.length > 0),
+    JSON.stringify(bad.records.map((r) => r.issues)),
+  );
+  check("月份越界被抓住", bad.records[4].issues.join("").indexOf("超出范围") >= 0);
+
+  // ---- AI 的存疑备注要保留下来，供人工核对 ----
+  const noted = ai.normalize(
+    { records: [{ name: "欧阳娜娜", hospital: "某医院", date: "2026-06-04", note: "「娜」字略模糊" }] },
+    core,
+  );
+  equal("aiNote 被保留", noted.records[0].aiNote, "「娜」字略模糊");
+  check(
+    "aiNote 不并进 issues（它是「不确定」而非「不合法」）",
+    noted.records[0].issues.length === 0 && noted.records[0].status === "ready",
+    JSON.stringify(noted.records[0].issues),
+  );
+
+  // ---- 脏数据不能把整批搞崩 ----
+  equal("records 不是数组时返回空", ai.normalize({ records: "x" }, core).records.length, 0);
+  equal(
+    "数组里的 null 被跳过",
+    ai.normalize({ records: [null, { name: "甲", hospital: "乙医院", date: "2025-1-2" }] }, core)
+      .records.length,
+    1,
+  );
+  equal(
+    "unreadable 透传",
+    ai.normalize({ records: [], unreadable: "图片太模糊" }, core).unreadable,
+    "图片太模糊",
+  );
+
+  // ---- core 缺失时必须抛错，而不是跳过校验 ----
+  let threw = false;
+  try {
+    ai.normalize({ records: [{ name: "甲", hospital: "乙", date: "2025-1-1" }] }, null);
+  } catch {
+    threw = true;
+  }
+  check("cert-core 缺失时抛错（不能跳过校验直接生成）", threw);
+
+  // ---- 图片本地预检：格式与体积 ----
+  const okTypes = ai.ALLOWED_IMAGE_TYPES;
+  check("允许 JPEG", okTypes.indexOf("image/jpeg") >= 0);
+  check("允许 PNG", okTypes.indexOf("image/png") >= 0);
+  check("拒绝了 image/bmp", okTypes.indexOf("image/bmp") < 0);
+  check("图片上限存在且合理", ai.MAX_IMAGE_BYTES > 0 && ai.MAX_IMAGE_BYTES <= 32 * 1024 * 1024);
+
+  // ---- 服务商配置 ----
+  check("注册了 DeepSeek", ai.getProvider("deepseek") !== null);
+  const ds = ai.getProvider("deepseek");
+  check("DeepSeek 声明支持图片", ds.supportsImage === true);
+  check("DeepSeek 端点正确", /^https:\/\/api\.deepseek\.com\//.test(ds.endpoint), ds.endpoint);
+  equal("默认模型是 deepseek-flash", ds.defaultModel, "deepseek-flash");
+}
+
+/* ------------------------------------------------- 7. 逐份 / 合批两种输出方式 */
+
+async function testOutputModes() {
+  console.log("\n[7] PDF 输出方式：默认逐份（每人一个文件）");
+
+  const cloud = require(path.join(TOOL, "cert-cloud.js"));
+
+  // 造一个假服务商，把"调了几次、传了什么"记下来，避免真的联网
+  const calls = [];
+  const fakeProvider = {
+    id: "fake",
+    label: "Fake",
+    endpoint: "https://example.invalid/",
+    freeNote: "测试用",
+    credential: { key: "secret", label: "密钥" },
+    async convert({ bytes, filename }) {
+      calls.push({ bytes: bytes.length, filename: filename });
+      // 返回一个最小可识别的 PDF
+      return { bytes: new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x37]) };
+    },
+  };
+  cloud.PROVIDERS.push(fakeProvider);
+
+  const items = [
+    { name: "靳睿", docx: new Uint8Array([0x50, 0x4b, 3, 4, 1]), fileName: "TE操作培训证书_靳睿.pdf" },
+    { name: "耿楠", docx: new Uint8Array([0x50, 0x4b, 3, 4, 2]), fileName: "TE操作培训证书_耿楠.pdf" },
+    { name: "张三", docx: new Uint8Array([0x50, 0x4b, 3, 4, 3]), fileName: "TE操作培训证书_张三_2.pdf" },
+  ];
+
+  // ---- 默认：逐份 ----
+  calls.length = 0;
+  const single = await cloud.convertBatch({
+    items: items,
+    providerId: "fake",
+    credentials: { secret: "x" },
+    // 刻意不传 batch，验证默认值
+  });
+  equal("默认逐份：调用次数 = 份数", calls.length, items.length);
+  equal("默认逐份：产出文件数 = 份数", single.pdfList.length, items.length);
+  equal("默认逐份：batched = false", single.batched, false);
+  check(
+    "默认逐份：每份的文件名带姓名",
+    single.pdfList.every((pdf, i) => pdf.fileName === items[i].fileName),
+    JSON.stringify(single.pdfList.map((pdf) => pdf.fileName)),
+  );
+  check(
+    "默认逐份：同名重复的 _2 后缀保住了（不会被覆盖）",
+    single.pdfList.map((pdf) => pdf.fileName).join(",").indexOf("_2.pdf") >= 0,
+    single.pdfList.map((pdf) => pdf.fileName).join(","),
+  );
+  check(
+    "默认逐份：上传的文件名也逐份区分",
+    calls.map((c) => c.filename).join(",").indexOf("耿楠") >= 0,
+    calls.map((c) => c.filename).join(","),
+  );
+  check(
+    "逐份不需要 document.xml",
+    true,
+    "（本用例的 items 就没有 documentXml，能跑通即证明）",
+  );
+
+  // ---- 显式合批 ----
+  calls.length = 0;
+  const docx = new Uint8Array(require("fs").readFileSync(path.join(TOOL, "template-general.docx")));
+  const realItems = [];
+  for (const name of ["靳睿", "耿楠"]) {
+    const built = await build(name, "南京鼓楼医院");
+    realItems.push({ name, docx: built.docx, documentXml: built.documentXml });
+  }
+  const merged = await cloud.convertBatch({
+    items: realItems,
+    providerId: "fake",
+    credentials: { secret: "x" },
+    batch: true,
+    readZip: core.readZip,
+    writeZip: core.writeZip,
+  });
+  equal("显式合批：只调用 1 次", calls.length, 1);
+  equal("显式合批：产出 1 个文件", merged.pdfList.length, 1);
+  equal("显式合批：batched = true", merged.batched, true);
+  check(
+    "合批产物是拼好的多页文档（体积远大于单份）",
+    calls[0].bytes > realItems[0].docx.length,
+    "上传了 " + calls[0].bytes + " 字节，单份 " + realItems[0].docx.length,
+  );
+  check("合批文件名不带个人姓名", merged.pdfList[0].fileName === null, String(merged.pdfList[0].fileName));
+
+  // ---- 合批缺 document.xml 时必须明确报错，不能拿 undefined 去拼 ----
+  let message = "";
+  try {
+    await cloud.convertBatch({
+      items: [{ name: "甲", docx: docx }],
+      providerId: "fake",
+      credentials: { secret: "x" },
+      batch: true,
+      readZip: core.readZip,
+      writeZip: core.writeZip,
+    });
+  } catch (error) {
+    message = error.message;
+  }
+  // items 只有 1 份时走的是逐份路径，所以这里应该成功；用 2 份来测
+  let message2 = "";
+  try {
+    await cloud.convertBatch({
+      items: [{ name: "甲", docx: docx }, { name: "乙", docx: docx }],
+      providerId: "fake",
+      credentials: { secret: "x" },
+      batch: true,
+      readZip: core.readZip,
+      writeZip: core.writeZip,
+    });
+  } catch (error) {
+    message2 = error.message;
+  }
+  check(
+    "合批缺 document.xml 时明确报错（不是拿 undefined 去拼）",
+    /document\.xml/.test(message2),
+    message2 || "（没有抛错）",
+  );
+
+  // ---- 单份 + batch:true 应退化为逐份，不去拼多页 ----
+  calls.length = 0;
+  const one = await cloud.convertBatch({
+    items: [{ name: "单人", docx: docx, documentXml: new Uint8Array(1) }],
+    providerId: "fake",
+    credentials: { secret: "x" },
+    batch: true,
+    readZip: core.readZip,
+    writeZip: core.writeZip,
+  });
+  equal("只有 1 份时不做合批（1 次调用）", calls.length, 1);
+  equal("只有 1 份时 batched = false", one.batched, false);
+}
+
+/* ------------------------------------------- 8. PDF 打包成 ZIP（一次下载） */
+
+async function testPdfZip() {
+  console.log("\n[8] 多个 PDF 打包成一个 ZIP");
+
+  // writeZip 原本只装 docx，装 PDF 要实测：ZIP 头是否正、中文名是否保住、能否往返
+  const names = ["TE操作培训证书_靳睿.pdf", "TE操作培训证书_欧阳娜娜.pdf", "TE操作培训证书_张三_2.pdf"];
+  const entries = names.map((name, index) => ({
+    name: name,
+    // 造点有重复内容的伪 PDF，好验证压缩确实生效
+    data: new Uint8Array(4096).fill(0x41 + index),
+  }));
+
+  const zip = await core.writeZip(entries);
+  check("ZIP 有 PK 头", zip[0] === 0x50 && zip[1] === 0x4b);
+  check("ZIP 体积小于原始总和（压缩生效）", zip.length < 4096 * 3, zip.length + " vs " + 4096 * 3);
+
+  const read = await core.readZip(zip);
+  const fileEntries = read.filter((entry) => !entry.name.endsWith("/"));
+  equal("解压后文件数一致", fileEntries.length, names.length);
+  equal(
+    "文件名（含中文与 _2 后缀）完整保住",
+    fileEntries.map((entry) => entry.name).sort().join("|"),
+    names.slice().sort().join("|"),
+  );
+  for (const entry of fileEntries) {
+    equal(entry.name + " 的内容长度往返一致", entry.data.length, 4096);
+  }
+
+  // 单个文件时不打包（没必要多一层解压）
+  const one = await core.writeZip([{ name: names[0], data: entries[0].data }]);
+  const oneRead = await core.readZip(one);
+  equal("单文件 ZIP 也能正常读", oneRead.filter((e) => !e.name.endsWith("/")).length, 1);
+
+  // app.js 的打包条件：多于一个文件就打包，**没有开关** ——
+  // 连续下载会被浏览器拦，这不是用户该做的选择，所以不给选项。
+  const appSource = require("fs").readFileSync(path.join(TOOL, "app.js"), "utf8");
+  const htmlSource = require("fs").readFileSync(path.join(TOOL, "index.html"), "utf8");
+  check(
+    "只有多于 1 个文件时才打包",
+    /const shouldZip = files\.length > 1;/.test(appSource),
+    "单文件也打包会让用户白白多解压一次",
+  );
+  check(
+    "打包是自动的，没有开关（不该再出现 pdfZipToggle）",
+    !/pdfZipToggle/.test(appSource) && !/pdfZipToggle/.test(htmlSource),
+    "ZIP 是技术细节，不该让用户选",
+  );
+  check(
+    "打包时不逐个触发下载（否则浏览器仍会拦）",
+    /if \(shouldZip\)[\s\S]{0,400}writeZip[\s\S]{0,200}\} else \{[\s\S]{0,200}triggerDownload/.test(appSource),
+    "两条路必须是互斥的 if/else",
+  );
+  check("ZIP 的 MIME 是 application/zip", /"application\/zip"/.test(appSource));
+}
+
 /* ------------------------------------------------------------------ 入口 */
 
 (async function main() {
@@ -376,6 +859,9 @@ function testDate() {
   testProviders();
   testMerge();
   testDate();
+  testAiExtraction();
+  await testOutputModes();
+  await testPdfZip();
 
   console.log("\n" + "=".repeat(70));
   console.log("通过 " + passed + " 项，失败 " + failures.length + " 项。");

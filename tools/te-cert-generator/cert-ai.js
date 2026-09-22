@@ -1,0 +1,454 @@
+/**
+ * 名单解析 —— AI 抽取（OpenAI 兼容接口，浏览器直连）
+ *
+ * ⚠ 定位：这是**增强**，不是替代。规则解析（cert-core 的 prepareRecordsFromText）
+ *   仍然是默认路径 —— 免费、离线、快、结果可预测。AI 只在两种情况下用：
+ *     1) 规则解析失败或结果不对（表格、分行、一句话叙述、含职称工号……）
+ *     2) 输入是图片（手机拍的签到表、微信截图），规则解析根本做不到
+ *
+ * ⚠ 最大的风险是幻觉，而证书印错名字不可挽回。所以本模块的设计原则是：
+ *   - 抽取结果必须过和规则解析**同一套**校验（core.validateRecord），
+ *     缺姓名/缺医院/日期非法的一律标红，绝不静默进生成队列
+ *   - 每条记录带上模型的 note（有疑问的地方），一并显示给用户核对
+ *   - 永远不自动补全姓名：提示词明确要求「没看清就留空并写进 note」
+ *
+ * 为什么需要它：实测规则解析在这些输入上会失败或静默出错 ——
+ *   制表符表格 → 整行塌成一条；姓名与信息分行 → 拆出一堆垃圾记录；
+ *   「Jin Rui, Geng Nan, Nanjing Gulou Hospital, …」→ 一个词一条；
+ *   日期写在前面 → 全乱；带「1. 靳睿 主治医师」→ 工号被当姓名。
+ *   更糟的是「医院名不含特征词」（如「中大附一」）时会**静默丢掉日期**而不报错。
+ *
+ * 实测过的接口契约（2026-09，DeepSeek）：
+ *   POST https://api.deepseek.com/chat/completions
+ *   Authorization: Bearer <key>
+ *   { model: "deepseek-flash", messages: [...], response_format: {type:"json_object"} }
+ *   CORS：预检 200 且回显 Origin，**错误响应也带 Access-Control-Allow-Origin**，
+ *        所以浏览器直连可用，且 401 时能读到真实错误（不像 Adobe 会被 CORS 掩盖）。
+ *   同一个 deepseek-flash 模型同时支持图片与 json 输出，所以文本/图片共用一条路径。
+ */
+(function (root, factory) {
+  const api = factory();
+  if (typeof module === "object" && module.exports) {
+    module.exports = api;
+  } else {
+    root.CertAi = api;
+  }
+})(typeof self !== "undefined" ? self : this, function () {
+  "use strict";
+
+  const DEFAULT_TIMEOUT_MS = 120000;
+
+  /** 单张图片大小上限：接口限 32 MiB，这里留足余量并按常见手机照片设限 */
+  const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
+  const ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"];
+
+  /** 提示词里的字段名，改这里要同步改 PROMPT 与 normalize */
+  const FIELDS = ["name", "hospital", "date", "note"];
+
+  const PROMPT = [
+    "你是证书名单的信息抽取器。从用户给的材料里抽出「颁发证书」所需的三项信息。",
+    "",
+    "输出一个 json 对象，格式严格如下：",
+    '{"records":[{"name":"","hospital":"","date":"","note":""}],"unreadable":""}',
+    "",
+    "【材料可能有两部分，必须合并理解】",
+    "用户可能同时给出「一张图片」和「一段文字」。这两部分是**同一次颁发的同一个名单**，",
+    "不是两批人。请把两部分的信息合并到同一个人身上。",
+    "",
+    "【谁说了算 —— 这条最重要，违反它比少抽一个人更糟】",
+    "文字部分是用户**亲手输入**的，优先级**最高**，无条件覆盖图片里读到的同类信息：",
+    "- 文字里写了日期，就用文字里的日期。**不要**用它去和图片里的日期比较、",
+    "  不要取更早或更晚的那个、不要因为图片上印着别的日期就改成年份更小的。",
+    "  图片里印的日期（模板日期、示例日期、往期证书的日期）一律**忽略**。",
+    "- 文字里写了医院名称，同理直接用文字里的，忽略图片上的机构名。",
+    "- 文字里**没写**的字段，才从图片里读；两边都没有就留空字符串。",
+    "",
+    "- 姓名以**图片**为主要来源；只有图片里没有姓名时才用文字里的姓名。",
+    "- 文字里的医院名称/日期是**整批人共用的**，要套用到每一位来自图片的人身上。",
+    "  例如图片是 3 个人的姓名、文字写着「〈某医院全称〉 〈某日期〉」，",
+    "  那这 3 个人的医院和日期都填这两项 —— 正确结果是 3 条，不是 4 条。",
+    "- **绝对不要**因为文字里提到了医院或日期，就为它们单独生成一条记录；",
+    "  也不要因为同一个人在图片和文字里都出现，就生成两条。",
+    "- 只有当文字里确实出现了**新的姓名**时，才增加记录。",
+    "",
+    "【抽取规则】",
+    "1. 一项记录 = 一个要颁发证书的人。同一个人不要拆成多条，多个人也不要合并成一条。",
+    "2. name：只放姓名本身，去掉编号、职称、工号、称谓（如编号、职称、称谓词）。",
+    "3. hospital：机构全称。材料里没有就留空字符串，不要猜、不要编。",
+    "4. date：统一写成 YYYY-MM-DD 这种形式。材料里没有日期、或只有月份没有日子，就留空。",
+    "5. note：这一条有任何不确定就写一句简短说明；完全确定就留空字符串。",
+    "   但如果某个字段是文字里明确写了的，就**不算不确定**，不要在 note 里质疑它。",
+    "6. 图片里的姓名必须逐字照抄，**绝对不要补全或纠正**。看不清的字写进 note，",
+    "   而不是猜一个看起来合理的名字。宁可让用户来核对。",
+    "7. 抽不到任何记录时 records 为空数组，并在 unreadable 里说明原因。",
+    "8. 只输出 json，不要任何解释文字、不要 markdown 代码块。",
+    "",
+    "【示例中出现的具体机构名与日期都是占位符，不是本次数据，绝对不要照抄】",
+    "",
+    "示例一（纯文字）：",
+    "输入：〈姓名1〉、〈姓名2〉、〈姓名3〉 〈机构全称A〉 〈日期A〉",
+    '输出：{"records":[{"name":"〈姓名1〉","hospital":"〈机构全称A〉","date":"〈日期A 的 YYYY-MM-DD 形式〉","note":""},' +
+      '{"name":"〈姓名2〉","hospital":"〈机构全称A〉","date":"〈同上〉","note":""},' +
+      '{"name":"〈姓名3〉","hospital":"〈机构全称A〉","date":"〈同上〉","note":""}],"unreadable":""}',
+    "",
+    "示例二（图片 + 文字，最常见的组合）：",
+    "图片上是手写姓名「〈姓名甲〉/〈姓名乙〉/〈姓名丙〉」，没有任何日期；",
+    "文字写着「这几个人是〈机构全称B〉的，日期〈日期B〉」。",
+    "正确输出是 3 条记录，每条的 hospital 都是「〈机构全称B〉」、date 都是〈日期B〉；",
+    "绝不能出现第 4 条以机构名或日期为姓名的记录，也绝不能把日期取成图片上的任何痕迹。",
+  ].join("\n");
+
+  const PROVIDERS = [
+    {
+      id: "deepseek",
+      label: "DeepSeek",
+      endpoint: "https://api.deepseek.com/chat/completions",
+      defaultModel: "deepseek-flash",
+      // 同一模型既能读图也能出 json，所以不用区分文本/图片路径
+      supportsImage: true,
+      keyPlaceholder: "粘贴 DeepSeek API Key（sk- 开头）",
+      help: "在 platform.deepseek.com 创建 API Key。密钥只存本机浏览器。",
+      models: ["deepseek-flash", "deepseek-v4-pro"],
+    },
+    {
+      id: "openai-compatible",
+      label: "其它 OpenAI 兼容接口",
+      endpoint: "",
+      defaultModel: "",
+      supportsImage: true,
+      keyPlaceholder: "粘贴该服务的 API Key",
+      help:
+        "填任意 OpenAI 兼容服务的地址与模型名，例如本机 Ollama" +
+        "（http://localhost:11434/v1/chat/completions，模型填 qwen2.5vl）。" +
+        "注意：该地址必须在页面的 CSP 白名单里，否则浏览器会直接拦掉请求。",
+      models: [],
+    },
+  ];
+
+  function getProvider(id) {
+    return PROVIDERS.find((provider) => provider.id === id) || null;
+  }
+
+  function sleep(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  /* ------------------------------------------------------------ 请求构造 */
+
+  /**
+   * 构造 user 消息的 content。
+   * 图片必须放在 user 消息里 —— 接口规定 system / assistant 里出现图片会返回 400。
+   */
+  function buildContent(text, image) {
+    if (!image) return text;
+    return [
+      { type: "text", text: text },
+      {
+        type: "image_url",
+        // 用 base64 data URL 内联，避免依赖外部图床；接口从内容判断真实格式
+        image_url: { url: "data:" + image.mime + ";base64," + image.base64 },
+      },
+    ];
+  }
+
+  /**
+   * 构造完整请求体。抽成纯函数是为了能在 Node 里断言 ——
+   * 请求形状错了只会在运行时才炸，而这里没有真实 key 可测。
+   */
+  function buildRequestBody(options) {
+    const text = (options.text || "").trim();
+    const image = options.image || null;
+
+    // 图片与文字是**同一次颁发的同一个名单**，文字通常用来补图片里没有的信息
+    // （医院名称、日期往往写在文字里）。这里把角色点明，配合提示词里的合并规则，
+    // 避免模型把它们当成两批人、生成重复记录。
+    let userText;
+    if (image && text) {
+      userText =
+        "【图片】下面这张图是名单（通常是姓名，可能是手写或截图）。\n" +
+        "【文字】以下是用户亲手补充的说明：\n" +
+        text +
+        "\n\n请把图片与文字**合并成同一个名单**：" +
+        "**文字里写了日期或医院名称就以文字为准，无条件覆盖图片里的**" +
+        "（图片上印的日期、往期日期一律忽略，不要拿它和文字里的日期比较）；" +
+        "姓名以图片为准；文字里的医院名称与日期套用到图片里的每一位。" +
+        "只有文字里出现新的姓名时才多加记录，同一个人不要因为两处都出现就算两条。";
+    } else if (image) {
+      userText = "请从这张图片里抽出证书名单。";
+    } else {
+      userText = text;
+    }
+
+    return {
+      model: options.model,
+      messages: [
+        { role: "system", content: PROMPT },
+        { role: "user", content: buildContent(userText, image) },
+      ],
+      // JSON Output：必须同时满足「提示词里出现 json 字样」+ 给出格式示例
+      response_format: { type: "json_object" },
+      // 给足余量，避免 json 被截断成半个对象
+      max_tokens: options.maxTokens || 4096,
+      temperature: 0,
+      stream: false,
+    };
+  }
+
+  /* ------------------------------------------------------------ 响应处理 */
+
+  /**
+   * 从模型返回里取出 json 文本。
+   * 官方文档明确提到 JSON Output 偶尔会返回空内容，所以空内容要给可操作的提示，
+   * 而不是让 JSON.parse 抛一句没头没尾的错。
+   */
+  function extractJsonText(payload) {
+    const choice = payload && payload.choices && payload.choices[0];
+    const message = choice && choice.message;
+    const content = message && message.content;
+    if (typeof content !== "string" || !content.trim()) {
+      const finish = choice && choice.finish_reason;
+      if (finish === "length") {
+        throw new Error(
+          "模型输出被长度限制截断了（finish_reason=length）。名单太长，请分批解析。",
+        );
+      }
+      throw new Error(
+        "模型返回了空内容。这是 JSON Output 的已知偶发问题，重试一次通常就好了。",
+      );
+    }
+    // 有些兼容服务会包一层 markdown 代码块，容错剥掉
+    return content.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
+  }
+
+  function parseDateLoose(value) {
+    const text = String(value == null ? "" : value).trim();
+    if (!text) return null;
+    const match = text.match(/(\d{2,4})\D{1,3}(\d{1,2})\D{1,3}(\d{1,2})/);
+    if (!match) return null;
+    let year = match[1];
+    if (year.length === 2) year = "20" + year;
+    const month = String(Number(match[2])).padStart(2, "0");
+    const day = String(Number(match[3])).padStart(2, "0");
+    const m = Number(month);
+    const d = Number(day);
+    if (m < 1 || m > 12 || d < 1 || d > 31) return null;
+    return { year: year, month: month, day: day, dateText: year + "/" + m + "/" + d };
+  }
+
+  /**
+   * 把模型返回的对象规整成内部记录，并**复用规则解析那套校验**。
+   *
+   * 这是本模块最重要的一段：AI 的输出绝不能绕过校验直接进生成队列。
+   * 缺项的一律标记出来交给用户在表格里改，而不是静默生成一份有问题的证书。
+   *
+   * ⚠ 字段名必须用 core 约定的形态，不能自创：
+   *   core.validateRecord 读的是 `dateRaw`（原始日期字符串），不是 `dateText`。
+   *   传错字段名的后果是**永远报「缺少颁发日期」**——一个静默的、看起来像
+   *   "AI 没抽到日期"的错误，实际是适配层写错了。别改字段名。
+   *
+   * @param {object} payload 模型返回的 json
+   * @param {object} core window.CertCore（用它的 validateRecord）
+   */
+  function normalize(payload, core) {
+    const raw = payload && Array.isArray(payload.records) ? payload.records : [];
+    const records = [];
+
+    raw.forEach((item, index) => {
+      if (!item || typeof item !== "object") return;
+      const note = String(item.note == null ? "" : item.note).trim();
+
+      // 按 core 的约定构造：dateRaw 放原始字符串，validateRecord 自己解析
+      const dateRaw = String(item.date == null ? "" : item.date).trim();
+      const base = {
+        name: String(item.name == null ? "" : item.name).trim(),
+        hospital: String(item.hospital == null ? "" : item.hospital).trim(),
+        dateRaw: dateRaw,
+      };
+
+      if (!core || typeof core.validateRecord !== "function") {
+        throw new Error("cert-core 未加载，无法校验 AI 结果（不能跳过校验直接生成）。");
+      }
+      const validated = core.validateRecord(base);
+
+      // 日期解析成功时，把展示用的 dateText 也补上（表格允许直接改这一列）
+      const extra = {};
+      if (validated.date) {
+        extra.dateText = validated.date.year + "/" +
+          Number(validated.date.month) + "/" + Number(validated.date.day);
+      }
+
+      records.push(Object.assign({}, validated, extra, {
+        lineNo: index + 1,
+        selected: true,
+        aiNote: note,
+      }));
+    });
+
+    return {
+      records: records,
+      unreadable: String((payload && payload.unreadable) || "").trim(),
+    };
+  }
+
+  /* -------------------------------------------------------------- 主流程 */
+
+  /**
+   * 调 AI 抽取名单。
+   *
+   * @param {object} options
+   * @param {string} options.text 文本输入（可为空，只要给了图片）
+   * @param {{base64:string, mime:string, name:string}|null} options.image 图片（可选）
+   * @param {string} options.apiKey
+   * @param {string} options.model
+   * @param {string} [options.endpoint] 覆盖端点（用于"其它 OpenAI 兼容接口"）
+   * @param {object} options.core window.CertCore
+   * @param {AbortSignal} [options.signal]
+   * @param {(stage:string)=>void} [options.onStage]
+   * @returns {Promise<{records:Array, unreadable:string, usage:object|null, raw:string}>}
+   */
+  async function extractRecords(options) {
+    const { text, image, apiKey, model, core, signal, onStage } = options;
+    const endpoint = options.endpoint || (getProvider("deepseek") || {}).endpoint;
+
+    if (!endpoint) throw new Error("没有配置接口地址。");
+    if (!apiKey) throw new Error("请先填写 API Key。");
+    if (!model) throw new Error("请先填写模型名。");
+    if (!text && !image) throw new Error("没有可解析的内容：请填文本或选一张图片。");
+
+    const body = buildRequestBody({ text: text, image: image, model: model });
+
+    if (onStage) onStage(image ? "正在识别图片…" : "正在解析文本…");
+
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+    const onAbort = () => controller.abort();
+    if (signal) {
+      if (signal.aborted) controller.abort();
+      else signal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    let response;
+    try {
+      response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer " + apiKey,
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (error && error.name === "AbortError") {
+        if (signal && signal.aborted) throw error;
+        throw new Error("请求超时（超过 " + Math.round(DEFAULT_TIMEOUT_MS / 1000) + " 秒）。");
+      }
+      throw new Error(
+        "请求失败：" + (error && error.message ? error.message : String(error)) +
+          " —— 常见原因是网络不通、Key 填错，或该地址不在页面 CSP 白名单里（会被浏览器直接拦掉）。",
+      );
+    } finally {
+      clearTimeout(timer);
+      if (signal) signal.removeEventListener("abort", onAbort);
+    }
+
+    const rawText = await response.text();
+    if (!response.ok) {
+      // DeepSeek 的错误响应**带 CORS 头**，所以这里能读到真实原因（不像 Adobe 会被掩盖）
+      let detail = "";
+      try {
+        const json = JSON.parse(rawText);
+        detail = (json.error && (json.error.message || json.error.type)) || "";
+      } catch {
+        detail = rawText.slice(0, 200);
+      }
+      if (response.status === 401 || response.status === 403) {
+        detail += "（请检查 API Key 是否正确、是否还有余额）";
+      }
+      throw new Error("HTTP " + response.status + "：" + (detail || "未知错误"));
+    }
+
+    let payload;
+    try {
+      payload = JSON.parse(rawText);
+    } catch {
+      throw new Error(
+        "服务端返回的不是 JSON（HTTP " + response.status + "）：" + rawText.slice(0, 200),
+      );
+    }
+
+    const jsonText = extractJsonText(payload);
+    let parsed;
+    try {
+      parsed = JSON.parse(jsonText);
+    } catch {
+      throw new Error("模型输出的不是合法 json：" + jsonText.slice(0, 200));
+    }
+
+    if (onStage) onStage("正在校验…");
+    const normalized = normalize(parsed, core);
+
+    return {
+      records: normalized.records,
+      unreadable: normalized.unreadable,
+      usage: payload.usage || null,
+      raw: jsonText,
+    };
+  }
+
+  /** 把 File 读成 { base64, mime, name }，并在本地先做大小与格式检查。 */
+  function readImageFile(file, readAsDataUrl) {
+    return new Promise((resolve, reject) => {
+      if (!file) {
+        reject(new Error("没有选择图片。"));
+        return;
+      }
+      if (ALLOWED_IMAGE_TYPES.indexOf(file.type) < 0) {
+        reject(
+          new Error(
+            "不支持的图片格式：" + (file.type || "未知") + "。支持 JPEG / PNG / GIF / WebP。",
+          ),
+        );
+        return;
+      }
+      if (file.size > MAX_IMAGE_BYTES) {
+        reject(
+          new Error(
+            "图片太大（" + Math.round(file.size / 1024 / 1024) + " MB），上限 " +
+              Math.round(MAX_IMAGE_BYTES / 1024 / 1024) + " MB。请压缩或裁剪后重试。",
+          ),
+        );
+        return;
+      }
+      readAsDataUrl(file)
+        .then((dataUrl) => {
+          const comma = String(dataUrl).indexOf(",");
+          if (comma < 0) {
+            reject(new Error("图片读取失败。"));
+            return;
+          }
+          resolve({
+            base64: String(dataUrl).slice(comma + 1),
+            mime: file.type,
+            name: file.name || "image",
+          });
+        })
+        .catch(() => reject(new Error("图片读取失败。")));
+    });
+  }
+
+  return {
+    PROVIDERS: PROVIDERS,
+    FIELDS: FIELDS,
+    PROMPT: PROMPT,
+    MAX_IMAGE_BYTES: MAX_IMAGE_BYTES,
+    ALLOWED_IMAGE_TYPES: ALLOWED_IMAGE_TYPES,
+    getProvider: getProvider,
+    buildRequestBody: buildRequestBody,
+    extractJsonText: extractJsonText,
+    parseDateLoose: parseDateLoose,
+    normalize: normalize,
+    extractRecords: extractRecords,
+    readImageFile: readImageFile,
+  };
+});

@@ -658,29 +658,34 @@
   }
 
   /**
-   * 批量转换。
+   * 批量转换 —— 默认逐份，每人一个 PDF 文件。
    *
-   * 默认走「合批」：把 N 份证书拼成一份 N 页 DOCX，一次请求换成一份 N 页 PDF。
-   *   - 绕开前端 PDF 合并（云端产物是对象流 PDF，前端合并成本高）
-   *   - Adobe 按份计费，合批把 N 次调用压成 1 次，50 页以内都是一次事务
-   * 合批失败（例如模板不一致）时回退到逐份转换，不让整批卡死。
+   * 为什么默认逐份（而不是合批）：
+   *   证书是发给个人的，**每个人要拿到自己那一张 PDF**，
+   *   文件名形如 `TE操作培训证书_姓名.pdf`。合成一本多页 PDF 再发下去，
+   *   收件人还得自己找自己那页 —— 实际使用中客户不接受。
+   *   逐份转换天然就是这个结果，而且单份失败可以只重试那一份。
+   *
+   * 合批（N 份拼成一份 N 页 DOCX，一次请求换回一份多页 PDF）作为**可选项**保留：
+   *   Adobe 按「1 事务 = 1 份文档，最多 50 页」计费，合批把 N 次调用压成 1 次，
+   *   所以要归档一本合订本、或想省额度时可以用。
+   *   注意合批需要 documentXml（由 readZip 取出），逐份只需要 docx。
    *
    * @param {object} options
-   * @param {Array<{name:string, docx:Uint8Array, documentXml:Uint8Array}>} options.items
-   *        每项给出单页 docx 的字节，以及由 readZip 取出的 document.xml 字节。
-   *        两者都要：docx 用于逐份转换与 zip 承载，documentXml 用于合批。
+   * @param {Array<{name:string, docx:Uint8Array, documentXml?:Uint8Array}>} options.items
+   *        docx 是必填；documentXml 只在 batch=true 时需要。
    * @param {string} options.providerId 服务商 id
    * @param {object} options.credentials 凭据（按服务商不同）
-   * @param {boolean} [options.batch=true] 是否合批
-   * @param {Function} options.readZip cert-core 的 readZip
-   * @param {Function} options.writeZip cert-core 的 writeZip
+   * @param {boolean} [options.batch=false] 是否合成一本多页 PDF（默认否）
+   * @param {Function} [options.readZip] cert-core 的 readZip（batch 时需要）
+   * @param {Function} [options.writeZip] cert-core 的 writeZip（batch 时需要）
    * @param {AbortSignal} [options.signal]
    * @param {(info:object)=>void} [options.onProgress]
    * @returns {Promise<{pdfList:Array, failed:Array, batched:boolean}>}
    */
   async function convertBatch(options) {
     const { items, providerId, credentials, signal, onProgress, readZip, writeZip } = options;
-    const batch = options.batch !== false;
+    const batch = options.batch === true;
     const provider = getProvider(providerId);
     if (!provider) throw new Error("未知的转换服务：" + providerId);
     if (!items.length) throw new Error("没有待转换的证书。");
@@ -704,6 +709,21 @@
     };
 
     if (batch && items.length > 1) {
+      // 合批需要 documentXml（由 readZip 取出）与 zip 读写函数。
+      // 缺了就明确报错，而不是拿着 undefined 去拼、产出一份坏文档。
+      if (typeof readZip !== "function" || typeof writeZip !== "function") {
+        throw new Error("合批需要 readZip / writeZip（来自 cert-core）。");
+      }
+      const missingXml = items.filter((item) => !item.documentXml || !item.documentXml.length);
+      if (missingXml.length) {
+        throw new Error(
+          "合批需要每份证书的 document.xml 字节，但 " +
+            missingXml.length +
+            " 份缺少（如「" +
+            (missingXml[0].name || "?") +
+            "」）。请改用逐份转换。",
+        );
+      }
       try {
         const combinedXml = buildBatchDocx(
           items.map((item) => ({ name: item.name, documentXml: item.documentXml })),
@@ -726,6 +746,8 @@
         });
         pdfList.push({
           name: `TE操作培训证书_${items.length}份`,
+          // 合批产物是一本合订本，文件名不带个人姓名
+          fileName: null,
           bytes: assertPdf(normalizeResult(result)),
         });
         speak({ done: 1, total: 1, stage: "完成" });
@@ -759,7 +781,13 @@
           onStage: (stage) => speak({ done: index, total: total, name: item.name, stage }),
           ...credentials,
         });
-        pdfList.push({ name: item.name, bytes: assertPdf(normalizeResult(result), item.name) });
+        pdfList.push({
+          // fileName 由调用方给出（形如 TE操作培训证书_姓名.pdf），
+          // 这样同名重复的 _2、_3 后缀也能保住，不会被覆盖
+          name: item.name,
+          fileName: item.fileName || null,
+          bytes: assertPdf(normalizeResult(result), item.name),
+        });
         speak({ done: index + 1, total: total, name: item.name, stage: "完成" });
       } catch (error) {
         failed.push({ name: item.name, error: error.message || String(error) });

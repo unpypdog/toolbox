@@ -1093,3 +1093,84 @@ footer {
 .cloud-block .action-row {
   grid-template-columns: repeat(2, minmax(0, 1fr));
 }
+
+/* ------------------------------------------------- AI 解析（图片输入与存疑备注） */
+
+/* AI 那块的拖放区比 CSV 导入的矮一些：图片只需要提示格式与体积 */
+.drop-zone--compact {
+  padding: 14px 12px;
+}
+
+.drop-zone--compact strong {
+  font-size: 0.84rem;
+}
+
+.drop-zone--compact span {
+  font-size: 0.72rem;
+}
+
+/* AI 标出的存疑提示。刻意与 issues（红色「需处理」）区分开：
+   note 只是模型不确定，不代表这条不合规，所以用琥珀色而不是红色。 */
+.ai-note {
+  display: block;
+  margin-top: 2px;
+  font-size: 0.7rem;
+  line-height: 1.5;
+  color: #8a5a00;
+  overflow-wrap: anywhere;
+}
+
+/* ------------------------------------------------- PDF 输出方式开关 */
+
+.merge-toggle {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+  padding: 10px 12px;
+  font-size: 0.78rem;
+  color: var(--ink-soft);
+  background: var(--paper-bright);
+  border: 1px solid var(--line);
+}
+
+.merge-toggle input {
+  margin-top: 3px;
+}
+
+.merge-toggle b {
+  display: block;
+  color: var(--ink);
+}
+
+.merge-toggle small {
+  display: block;
+  margin-top: 3px;
+  font-size: 0.72rem;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.merge-toggle__cost {
+  color: var(--ink-soft);
+  opacity: 0.85;
+}
+
+.merge-toggle code {
+  font-size: 0.72rem;
+}
+
+/* 表格底部：勾选状态 + 新增行按钮 */
+.table-footer__actions {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.selected-count {
+  font-size: 0.74rem;
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
