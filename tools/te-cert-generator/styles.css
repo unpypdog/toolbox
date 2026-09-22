@@ -1221,7 +1221,6 @@ footer {
 .col-file.is-editable {
   color: var(--ink-soft);
 }
-
 /* ------------------------------------------------- AI 解析（图片输入与存疑备注） */
 
 /* AI 那块的拖放区比 CSV 导入的矮一些：图片只需要提示格式与体积 */
@@ -1237,8 +1236,8 @@ footer {
   font-size: 0.72rem;
 }
 
-/* AI 标出的存疑提示。刻意与 issues（红色「需处理」）区分开：
-   note 只是模型不确定，不代表这条不合规，所以用琥珀色而不是红色。 */
+/* AI 标出的存疑提示。它和 issues 一样会让这一行进入「需处理」（证书信息不能带着
+   模型疑问直接生成），但颜色分开：issue 是「不合规」，这条是「模型自己说没把握」。 */
 .ai-note {
   display: block;
   margin-top: 2px;
@@ -1246,6 +1245,23 @@ footer {
   line-height: 1.5;
   color: #8a5a00;
   overflow-wrap: anywhere;
+}
+
+/* AI 字段来源标记：只标「文字覆盖进来的」值，图片原值不标。
+   悬浮有 title 说明具体作用范围，这里只给一个不干扰阅读的小角标。 */
+td[data-source^="text"] {
+  position: relative;
+}
+
+td[data-source^="text"]::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--violet-deep);
 }
 
 /* ------------------------------------------------- PDF 输出方式开关 */

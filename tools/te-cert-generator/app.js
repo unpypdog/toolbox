@@ -511,7 +511,24 @@ function onCellInput(event) {
     hospital: field === "hospital" ? value : record.hospital,
     dateRaw: field === "dateRaw" ? value : record.dateRaw,
   });
+  // aiConflicts 里每条都记着它属于哪个字段（cert-ai 的 addRowIssue 保证的）。
+  // 用户手动编辑某个字段，就等于亲自核对过这个字段 —— 所以只解除**这个字段**的冲突，
+  // 其它字段的存疑必须原样留着。以前是无差别清空整行 note + 冲突，
+  // 结果「改了个姓名」会把「日期存疑」一起抹掉，那条提醒再也不会出现。
+  const aiField = field === "dateRaw" ? "date" : field;
+  const remainingAiConflicts = Array.isArray(record.aiConflicts)
+    ? record.aiConflicts.filter((item) => item && item.field !== aiField)
+    : [];
+  remainingAiConflicts.forEach((item) => {
+    if (item.message && revalidated.issues.indexOf(item.message) < 0) {
+      revalidated.issues.push(item.message);
+    }
+  });
+  revalidated.status = revalidated.issues.length ? "invalid" : "ready";
   Object.assign(record, revalidated);
+  record.aiConflicts = remainingAiConflicts;
+  // 通用 aiNote 没有字段归属，无法按字段解除；它已经由 cert-ai 升级成 issue 了，
+  // 这里保留原文用于展示（statusBadge 那行「AI 存疑：…」）。
   state.editing = { lineNo: record.lineNo, field: field };
 
   // 输出文件名依赖姓名，必须在这里重算：不能等失焦（点别处/不回点都不会触发），
@@ -766,9 +783,8 @@ function statusBadge(record) {
     hint.textContent = record.issues.join("；");
     wrap.appendChild(hint);
   }
-  // AI 的疑问备注单独一行显示。刻意不并进 issues —— issues 表示「不合法」，
-  // 而 note 只是「模型不确定」，语义不同；混在一起会让用户以为这条不能用。
-  // 但也不能不显示：证书印错名字不可挽回，这是人工核对的唯一线索。
+  // AI 的疑问备注单独一行展示具体细节；cert-ai 同时会把它升级为 issue，
+  // 让该行进入「需处理」且不自动勾选。证书信息不能带着模型疑问直接生成。
   if (record.aiNote) {
     const note = document.createElement("small");
     note.className = "ai-note";
@@ -863,6 +879,17 @@ function cell(text, className) {
   return td;
 }
 
+/** aiSources 的取值形如 "image" / "text:global" / "text:named"，转成人话。 */
+function sourceLabel(source) {
+  if (source === "image") return "图片";
+  const scope = String(source).replace(/^text:/, "");
+  if (scope === "global") return "文字（整批）";
+  if (scope === "named") return "文字（点名）";
+  if (scope === "rows") return "文字（按行）";
+  if (scope === "ordered") return "文字（按顺序）";
+  return "文字";
+}
+
 function editableCell(record, field, value, label, className) {
   const td = document.createElement("td");
   td.className = className + " is-editable";
@@ -873,6 +900,14 @@ function editableCell(record, field, value, label, className) {
   td.spellcheck = false;
   td.setAttribute("role", "textbox");
   td.setAttribute("aria-label", `第 ${record.lineNo} 行 ${label}`);
+  // AI 结果标出每个字段的来源：图片上的原值，还是文字覆盖进来的、按什么作用范围。
+  // 只看表格分不清「这个日期是图上印的还是我写的」，核对时要的就是这一条线索。
+  // 注意字段名对不上：aiSources 用 core 约定的 `date`，而这一列是 `dateRaw`。
+  const source = record.aiSources && record.aiSources[field === "dateRaw" ? "date" : field];
+  if (source && value) {
+    td.dataset.source = source;
+    td.title = `来源：${sourceLabel(source)}`;
+  }
   td.textContent = value || "";
   if (!value) td.classList.add("is-blank");
   return td;
@@ -1530,7 +1565,7 @@ async function runAiParse() {
     render();
 
     const noted = incoming.filter((record) => record.aiNote).length;
-    const notes = [];
+    const notes = Array.isArray(result.warnings) ? result.warnings.slice() : [];
     if (result.unreadable) notes.push(result.unreadable);
     if (noted) notes.push(`${noted} 条 AI 标了存疑，请重点核对`);
     reportParseResult(incoming, notes);

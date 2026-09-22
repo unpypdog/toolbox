@@ -6,11 +6,11 @@
  *     1) 规则解析失败或结果不对（表格、分行、一句话叙述、含职称工号……）
  *     2) 输入是图片（手机拍的签到表、微信截图），规则解析根本做不到
  *
- * ⚠ 最大的风险是幻觉，而证书印错名字不可挽回。所以本模块的设计原则是：
- *   - 抽取结果必须过和规则解析**同一套**校验（core.validateRecord），
- *     缺姓名/缺医院/日期非法的一律标红，绝不静默进生成队列
- *   - 每条记录带上模型的 note（有疑问的地方），一并显示给用户核对
- *   - 永远不自动补全姓名：提示词明确要求「没看清就留空并写进 note」
+ * ⚠ 最大的风险是幻觉，而证书印错名字不可挽回。所以本模块把职责硬拆开：
+ *   - AI 只返回图片事实、文字人员和带作用范围的赋值指令，不输出最终名单
+ *   - mergeExtraction 在本地按固定优先级完成匹配、覆盖与冲突判定
+ *   - 合并结果再过 core.validateRecord；缺项、冲突和 AI note 一律标红
+ *   - 永远不自动补全姓名：看不清就留空并写进 note
  *
  * 为什么需要它：实测规则解析在这些输入上会失败或静默出错 ——
  *   制表符表格 → 整行塌成一条；姓名与信息分行 → 拆出一堆垃圾记录；
@@ -42,7 +42,7 @@
   const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
   const ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"];
 
-  /** 提示词里的字段名，改这里要同步改 PROMPT 与 normalize */
+  /** 最终证书字段名；提取契约另外包含 imageRows / textPeople / assignments */
   const FIELDS = ["name", "hospital", "date", "note"];
 
   /**
@@ -63,130 +63,42 @@
   const THINKING_TYPE = "disabled";
 
   const PROMPT = [
-    "你是证书名单的信息抽取器。从用户给的材料里抽出「颁发证书」所需的三项信息。",
+    "你是证书材料的事实提取器。你只负责识别材料中明确出现的事实，不负责合并图文、",
+    "选择覆盖优先级或生成最终证书名单；这些业务决定全部由程序完成。",
     "",
-    "【材料可能有两部分】",
-    "用户可能同时给出「一张图片」和「一段文字」。图片可能只有姓名，也可能每一行都包含",
-    "姓名、医院和日期；文字可能补充、修正或分组说明。它们是同一次颁发的同一个名单，",
-    "不是两批人。",
+    "材料可能包含图片、文字或两者。必须把图片与文字分开观察，不能用一边的内容补写另一边。",
+    "尤其不能拿图片日期修正文字日期，也不能把两边日期拼成第三个日期。",
     "",
-    "【内部流程：维护一张数据表，按四步执行 —— 这条最重要】",
-    "在推理过程中维护一张人员数据表，列为：name、hospital、date、note，外加一列 source。",
-    "source 记录每一行的来源（图片 / 文字）。这张表是本次解析的唯一事实来源，",
-    "全程按下面的顺序推进，不要跳步：",
+    "【图片事实 imageRows】",
+    "逐行读取与人员明确关联的 name、hospital、date，保持图片行序，row 从 1 开始。",
+    "图片可能只有姓名，也可能是完整表格；存在的字段都要读，读不到就留空，不要猜。",
+    "图片里的装饰、模板、示例或往期日期若不属于任何人员行，不要放进人员字段。",
+    "姓名逐字照抄；看不清就在 note 说明，不要自行纠正。evidence 填该行可见的简短原文。",
     "",
-    "第 1 步 · 先看清表格结构",
-    "先分别确认图片和文字各自能提供哪些字段：可能只有姓名，也可能是姓名、医院、日期都有的",
-    "完整表格。不要预设图片只有姓名。",
+    "【文字人员 textPeople】",
+    "列出文字中明确作为证书领取人的姓名，只放姓名本身，去掉编号、职称、工号和称谓。",
+    "不要把医院、日期或说明文字当成人名。evidence 填包含该姓名的简短原文。",
     "",
-    "第 2 步 · 解析图片，填充数据表",
-    "逐行读取 name、hospital、date，有一项填一项、读不到的字段留空，不要猜。",
-    "保持图片原有的行顺序，并把这些行的 source 标为图片。",
-    "不能因为常见图片只有姓名而忽略其中已经存在的医院或日期 —— 与具体人员同一行/同一列明确关联",
-    "的医院和日期要正常提取。只有装饰文字、模板日期、示例日期、往期证书日期这类，",
-    "不属于任何人员数据行的内容才忽略，不要拿它们与文字里的日期比较，也不要取更早或更晚的一个。",
-    "图片中的人员行是合并锚点：文字可以明确纠正某个人的姓名、或补充图片漏掉的人，",
-    "但同一个人不能因此变成两条。",
+    "【文字赋值 assignments】",
+    "把文字中的医院、日期以及明确的姓名纠正提取成赋值指令。这里只报告值和它在原文中的",
+    "作用范围，不执行覆盖。field 只能是 hospital、date、name；date 统一为 YYYY-MM-DD。",
+    "scope 只能是下面五种：",
+    "- named：原文明确定义给某些姓名，姓名放 targetNames。",
+    "- rows：原文明确定义给图片中的某些行/位置/分组，1 开始的行号放 targetRows。",
+    "- ordered：原文给出可与图片人员行一一对应的一列值，按顺序放 values。",
+    "- global：该字段在文字中恰好只有一个值，且没有任何按人或按组区分的迹象。",
+    "- ambiguous：出现多个候选值，但原文无法判断分别属于谁；values 放全部候选值，并说明原因。",
+    "医院和日期分别判断 scope。不要因为图片已有值就改变 scope；你只忠实报告文字表达。",
+    "name 纠正只能使用 rows，并用 targetRows 指明被纠正的图片行。",
+    "evidence 必须摘录支持这条赋值的简短原文；没有证据就不要创建赋值。",
     "",
-    "第 3 步 · 解析文字，逐人匹配并补充到对应行",
-    "文字可能描述整批，也可能分成多个人或多个小组；医院和日期**不一定整批相同**。",
-    "先判断每个值的适用范围，再填进对应行：",
-    "- 匹配优先级从高到低：文字中明确点名的人 > 明确的分组/范围（如前两位、某几人、",
-    "  第一组/第二组）> 行列或列表顺序能一一对应 > 唯一且无分组迹象的全局值。",
-    "- 只有文字中**恰好只有一个**医院或日期，且没有任何按人/按组区分的迹象时，才把它作为",
-    "  全局值应用给所有行，而且只填进该字段为空的行、不覆盖图片里已有的值。",
-    "  医院和日期要分别判断：医院可全局而日期分组，或日期全局而医院分组。",
-    "- 文字里出现多个医院或多个日期时，必须逐人匹配或逐组匹配，绝不能任选一个覆盖所有人，",
-    "  也不能把最后出现的值套给所有人。",
-    "- 对已经匹配到某个人或小组的文字值，文字优先：只覆盖这些行的同名字段，",
-    "  文字没有明确涉及的字段必须保留图片基础表格中的原值，不要清空或改写。",
-    "- **匹配到的字段一律以文字的值为准，整字段替换，不和图片值做任何调和**：",
-    "  哪怕两边看起来像同一个日期，也不要去比较、不要挑其中一部分、不要改动它的任何一位。",
-    "  文字说〈日期B〉，这一行的 date 就照抄〈日期B〉，图片里印的是别的日期一律不影响它",
-    "  （模板日期、示例日期、往期证书的日期更不能拿来比）。",
-    "- 两位年份各自独立换算（26 开头的年份是 2026、22 开头的是 2022），",
-    "  图片上的年份绝不能用来改文字里的年份 —— 图片是往期证书时最容易犯这个错。",
-    "- 多个候选值但归属不清时：该行该字段已有图片值就保留图片原值，没有就留空，",
-    "  并在该行的 note 写明「多个医院/日期，无法确定对应关系」。宁可让用户核对，",
-    "  也绝对不要猜一个值。",
-    "- 已经明确绑定到这个人的文字字段按文字值确定，属于「已确认」，不用在 note 里表示存疑。",
-    "- 文字里已经有对应行（同名或明确指向）的，只补充字段，**不要新增行**。",
-    "- 只有文字里出现数据表中没有的新姓名时，才新增一行，source 标为文字。",
-    "  **绝对不要**因为文字提到医院或日期，就为它们单独生成一条记录（单独建行）；",
-    "  也不要因为同一个人的姓名在图片和文字里都出现就建两行。",
-    "",
-    "第 4 步 · 对完整数据表做分析，输出结果",
-    "数据表填完后逐行核对：每人一行、name 非空、date 已统一成 YYYY-MM-DD。",
-    "不要在输出阶段再凭印象补字段或改变某行的归属 —— 你只能从这张表读，",
-    "表里没有的内容一律不许在输出里出现。",
-    "",
-    "【抽取规则】",
-    "1. 一项记录 = 一个要颁发证书的人。同一个人不要拆成多条，多个人也不要合并成一条。",
-    "2. name：只放姓名本身，去掉编号、职称、工号、称谓（如编号、职称、称谓词）。",
-    "3. hospital：机构全称。材料里没有就留空字符串，不要猜、不要编。",
-    "4. date：统一写成 YYYY-MM-DD 这种形式。材料里没有日期、或只有月份没有日子，就留空。",
-    "5. note：这一条有任何不确定就写一句简短说明；完全确定就留空字符串。",
-    "   如果某个字段已在文字中明确绑定到这个人或其小组，就不算不确定；如果文字中有",
-    "   多个候选值却无法确定归属，必须留空并在 note 中说明，不能悄悄选一个。",
-    "6. 图片里的姓名必须逐字照抄，**绝对不要补全或纠正**。看不清的字写进 note，",
-    "   而不是猜一个看起来合理的名字。宁可让用户来核对。",
-    "7. 抽不到任何记录时 records 为空数组，并在 unreadable 里说明原因。",
-    "8. 只输出 json，不要任何解释文字、不要 markdown 代码块。",
-    "",
-    "【输出格式】",
-    "数据表是你内部的推理过程，**不要**把它打印在 json 里。只输出：",
-    '{"records":[{"name":"","hospital":"","date":"","note":""}],"unreadable":""}',
-    "records 的长度与数据表的行数一致（读不到任何记录时为空数组）。",
-    "",
-    "【示例中出现的具体机构名与日期都是占位符，不是本次数据，绝对不要照抄】",
-    "",
-    "示例一（只有文字）：",
-    "输入：〈姓名1〉、〈姓名2〉、〈姓名3〉 〈机构全称A〉 〈日期A〉",
-    "数据表：3 行，source 都是文字；医院和日期在文字里各只有一个、且没有分组迹象，",
-    "所以作为全局值填给这 3 行。",
-    '输出：{"records":[{"name":"〈姓名1〉","hospital":"〈机构全称A〉","date":"〈日期A 的 YYYY-MM-DD 形式〉","note":""},' +
-      '{"name":"〈姓名2〉","hospital":"〈机构全称A〉","date":"〈同上〉","note":""},' +
-      '{"name":"〈姓名3〉","hospital":"〈机构全称A〉","date":"〈同上〉","note":""}],"unreadable":""}',
-    "",
-    "示例二（图片给姓名，文字给全局的医院与日期）：",
-    "图片上是手写姓名「〈姓名甲〉/〈姓名乙〉/〈姓名丙〉」，没有任何日期；",
-    "文字写着「这几个人是〈机构全称B〉的，日期〈日期B〉」。",
-    "数据表：先由图片建 3 行（source = 图片），name 填好、hospital 与 date 留空；",
-    "再看文字，医院和日期各只有一个值且没有分组迹象，补进这 3 行的空字段。",
-    "正确输出是 3 条记录，每条的 hospital 都是「〈机构全称B〉」、date 都是〈日期B〉；",
-    "绝不能出现第 4 条以机构名或日期为姓名的记录，也绝不能把日期取成图片上的任何痕迹。",
-    "",
-    "示例三（图片本身就是完整表格）：",
-    "图片每一行都有姓名、机构和日期，文字没有修改这些字段。",
-    "数据表：这 3 个字段都在第 2 步就填满，第 3 步没有可补充的内容，表不再变动。",
-    "结果逐行完整保留图片里的三项信息，不能只提取姓名，也不能把某一行的机构或日期套到其他行。",
-    "",
-    "示例四（完整图片表格 + 文字只修正一个人的日期）：",
-    "图片每行都有姓名、机构和日期；文字只明确修改〈姓名乙〉的日期。",
-    "数据表：第 2 步逐行填满；第 3 步只更新〈姓名乙〉那一行的 date，该行 hospital 不变，",
-    "其他行一个字段都不动。",
-    "",
-    "示例五（图片给姓名，文字分两组）：",
-    "图片依次是「〈姓名甲〉/〈姓名乙〉/〈姓名丙〉/〈姓名丁〉」；文字明确说明",
-    "「〈姓名甲〉、〈姓名乙〉：〈机构全称C〉，〈日期C〉；",
-    "  〈姓名丙〉、〈姓名丁〉：〈机构全称D〉，〈日期D〉」。",
-    "数据表：文字把值明确分给了两个小组，所以第 3 步逐组填，而不是当全局值。",
-    "正确输出是 4 条：前两人的 hospital/date 使用 C 组，后两人使用 D 组。",
-    "绝不能只保留一个日期，也绝不能把最后一组覆盖到所有人。",
-    "",
-    "示例六（有多个候选值但归属不清）：",
-    "图片有多个人名，文字只列出「〈日期E〉、〈日期F〉」，没有说明分别属于谁。",
-    "数据表：第 3 步无法把这两个日期落到具体行 —— 该行 date 已有图片原值就保留，",
-    "没有就留空；两种情况都要在 note 标明文字中的日期对应关系不明确。",
-    "不得任选一个日期套给所有人。",
-    "",
-    "示例七（图片与文字都有日期，且不一致 —— 这条最容易错）：",
-    "图片是 4 个人的姓名，每行还印着同一日期〈日期G〉（〈日期G〉是〈日期H〉之前的一次颁发）；",
-    "文字写着「〈姓名甲〉、〈姓名乙〉、〈姓名丙〉、〈姓名丁〉 〈机构全称B〉 〈日期H〉」。",
-    "正确结果：4 行的 date 全部照抄〈日期H〉，一行都不留〈日期G〉，也不许把两者拼起来。",
-    "**错误**做法：把两个日期拿来比较、挑一个；或从〈日期G〉里搬一部分拼进〈日期H〉；",
-    "或日期用〈日期G〉而医院用文字的（一半一半）；或只给前几行用〈日期H〉。",
-    "文字已经明确给了日期，就是它说了算，图片上的那个日期只说明这张图是往期的。",
+    "没有相应材料时数组为空；读不到或看不清的内容一律留空。",
+    "只输出 json，不要解释、不要 markdown、不要输出最终 records。输出形状必须是：",
+    '{"imageRows":[{"row":1,"name":"","hospital":"","date":"","note":"","evidence":""}],' +
+      '"textPeople":[{"name":"","note":"","evidence":""}],' +
+      '"assignments":[{"field":"date","value":"","values":[],"scope":"global",' +
+      '"targetNames":[],"targetRows":[],"evidence":""}],"unreadable":""}',
+    "示例中的空字符串只是格式占位符，不是本次数据。",
   ].join("\n");
 
   const PROVIDERS = [
@@ -250,33 +162,23 @@
     const text = (options.text || "").trim();
     const image = options.image || null;
 
-    // 图片与文字是**同一次颁发的同一个名单**。图片可能本身就是含姓名/医院/日期的
-    // 完整表格，必须先完整提取填入数据表，再用文字逐人/逐组补充或修正。
+    // 模型只提取两种来源各自表达的事实与作用范围。图文合并由 mergeExtraction()
+    // 在本地按固定规则执行，不能再把业务流程交给模型自由发挥。
     let userText;
     if (image && text) {
       userText =
-        "【图片】下面这张图是名单（通常是姓名，可能是手写或截图）。\n" +
-        "【文字】以下是用户补充的说明：\n" +
+        "【文字材料（用户主动输入）】\n" +
         text +
-        "\n\n请把图片与文字**合并成同一个名单**，按系统提示里的四步流程维护那张数据表：" +
-        "先看清图片和文字各自能提供哪些字段；" +
-        "再逐行提取图片中的姓名、医院和日期，形成基础表格，图片已有的字段都要保留；" +
-        "然后把文字中的医院和日期按姓名、分组或明确顺序逐人匹配到对应行；" +
-        "文字里可能有多个医院或多个日期，绝不能任选一个覆盖所有人；" +
-        "只有某字段在文字里唯一且没有分组迹象时，才作为该字段的全局值，" +
-        "而且只填进该字段为空的行，不覆盖图片里已有的值；" +
-        "**文字里写了日期或医院，就以文字为准、整字段替换**" +
-        "（不要拿它和图片里的值比较、不要取年份更小的那个、" +
-        "也不要把文字的月和图片的年拼起来）；" +
-        "匹配到个人或小组的文字值只覆盖对应行的同名字段，文字未涉及的图片字段不变；" +
-        "文字里已经有对应行的只补充字段，不要新增行；" +
-        "候选值归属不清时，保留已有图片值，没有图片值才留空，并在 note 标明。" +
-        "最后以填好的数据表为准输出 json：只有文字里出现新姓名时才多一行，" +
-        "同一个人不要因为两处都出现就算两条。";
+        "\n\n【图片材料】随附的图片。\n" +
+        "请严格按 system 消息的提取契约，分别输出图片行、文字人员与文字赋值。" +
+        "不要合并、不要决定覆盖关系、不要输出最终 records。";
     } else if (image) {
-      userText = "请从这张图片里抽出证书名单。";
+      userText =
+        "只有图片材料。逐行提取 imageRows；textPeople 和 assignments 必须为空。" +
+        "不要输出最终 records。";
     } else {
-      userText = text;
+      userText =
+        "只有文字材料。提取 textPeople 与 assignments；imageRows 必须为空。\n\n" + text;
     }
 
     return {
@@ -342,19 +244,306 @@
     return content.trim().replace(/^```(?:json)?\s*/i, "").replace(/\s*```$/, "");
   }
 
-  function parseDateLoose(value) {
-    const text = String(value == null ? "" : value).trim();
-    if (!text) return null;
-    const match = text.match(/(\d{2,4})\D{1,3}(\d{1,2})\D{1,3}(\d{1,2})/);
-    if (!match) return null;
-    let year = match[1];
-    if (year.length === 2) year = "20" + year;
-    const month = String(Number(match[2])).padStart(2, "0");
-    const day = String(Number(match[3])).padStart(2, "0");
-    const m = Number(month);
-    const d = Number(day);
-    if (m < 1 || m > 12 || d < 1 || d > 31) return null;
-    return { year: year, month: month, day: day, dateText: year + "/" + m + "/" + d };
+  /* ---------------------------------------------- 本地工作流：事实 -> 最终记录 */
+
+  const SCOPE_PRIORITY = { global: 0, ordered: 1, rows: 2, named: 3 };
+  const ASSIGNABLE_FIELDS = ["name", "hospital", "date"];
+  const ASSIGNMENT_SCOPES = ["named", "rows", "ordered", "global", "ambiguous"];
+
+  function clean(value) {
+    return String(value == null ? "" : value).trim();
+  }
+
+  function cleanList(value) {
+    if (!Array.isArray(value)) return [];
+    return value.map(clean).filter(Boolean);
+  }
+
+  function cleanRows(value) {
+    if (!Array.isArray(value)) return [];
+    const seen = {};
+    return value
+      .map((item) => Number(item))
+      .filter((item) => Number.isInteger(item) && item > 0 && !seen[item] && (seen[item] = true));
+  }
+
+  function normalizedName(value) {
+    return clean(value).replace(/\s+/g, "").toLocaleLowerCase();
+  }
+
+  function pushUnique(list, value) {
+    const text = clean(value);
+    if (text && list.indexOf(text) < 0) list.push(text);
+  }
+
+  function makeWorkflowRow(item, source, imageRow) {
+    const note = clean(item && item.note);
+    const name = clean(item && item.name);
+    return {
+      name: name,
+      hospital: clean(item && item.hospital),
+      dateRaw: clean(item && (item.date != null ? item.date : item.dateRaw)),
+      aiNote: note,
+      aiSources: {
+        name: source,
+        hospital: source,
+        date: source,
+      },
+      workflowIssues: [],
+      workflowConflicts: [],
+      _imageRow: imageRow || null,
+      // 图片上的原始姓名快照，命名赋值匹配用（姓名纠正会改掉 name）
+      _imageName: name,
+      _fieldRules: {},
+    };
+  }
+
+  function addRowIssue(record, message, field) {
+    if (!record) return;
+    pushUnique(record.workflowIssues, message);
+    if (field && !record.workflowConflicts.some((item) => item.field === field && item.message === message)) {
+      record.workflowConflicts.push({ field: field, message: message });
+    }
+  }
+
+  function assignmentValue(assignment) {
+    return clean(assignment && assignment.value);
+  }
+
+  function normalizeAssignment(item, index, warnings) {
+    if (!item || typeof item !== "object") {
+      pushUnique(warnings, "第 " + (index + 1) + " 条文字赋值不是对象，已忽略");
+      return null;
+    }
+    const field = clean(item.field);
+    const scope = clean(item.scope);
+    if (ASSIGNABLE_FIELDS.indexOf(field) < 0) {
+      pushUnique(warnings, "第 " + (index + 1) + " 条文字赋值的 field 无效，已忽略");
+      return null;
+    }
+    if (ASSIGNMENT_SCOPES.indexOf(scope) < 0) {
+      pushUnique(warnings, "第 " + (index + 1) + " 条文字赋值的 scope 无效，已忽略");
+      return null;
+    }
+    return {
+      field: field,
+      scope: scope,
+      value: assignmentValue(item),
+      values: cleanList(item.values),
+      targetNames: cleanList(item.targetNames),
+      targetRows: cleanRows(item.targetRows),
+      evidence: clean(item.evidence),
+      index: index,
+      droppedNote: clean(item.note),
+    };
+  }
+
+  function findByNames(records, names) {
+    const wanted = names.map(normalizedName).filter(Boolean);
+    // 姓名可能已被 rows 赋值纠正过，而模型手里的姓名是从图片读的。
+    // 同时认「当前姓名」与「图片上的原始姓名」，否则同一人的点名赋值会找不到目标、
+    // 转而在 :504 的兜底分支里新增一行 —— 一次改名就变成两个人。
+    return records.filter(
+      (record) =>
+        wanted.indexOf(normalizedName(record.name)) >= 0 ||
+        (record._imageName && wanted.indexOf(normalizedName(record._imageName)) >= 0),
+    );
+  }
+
+  function findByImageRows(records, rows) {
+    return records.filter((record) => rows.indexOf(record._imageRow) >= 0);
+  }
+
+  function assignmentLabel(assignment) {
+    return assignment.field === "date" ? "日期" : assignment.field === "hospital" ? "医院" : "姓名";
+  }
+
+  function applyValue(record, assignment, value) {
+    const text = clean(value);
+    const label = assignmentLabel(assignment);
+    if (!text) {
+      addRowIssue(record, "文字中的" + label + "赋值为空，未覆盖原值", assignment.field);
+      return;
+    }
+
+    const priority = SCOPE_PRIORITY[assignment.scope];
+    const previous = record._fieldRules[assignment.field];
+    if (previous && previous.priority === priority && previous.value !== text) {
+      addRowIssue(
+        record,
+        "文字中有两个同等范围但不同的" + label + "：" + previous.value + " / " + text,
+        assignment.field,
+      );
+      return;
+    }
+    if (previous && previous.priority > priority) return;
+
+    if (assignment.field === "date") record.dateRaw = text;
+    else record[assignment.field] = text;
+    record.aiSources[assignment.field] = "text:" + assignment.scope;
+    record._fieldRules[assignment.field] = { priority: priority, value: text };
+  }
+
+  function targetsForAssignment(records, assignment) {
+    if (assignment.scope === "global") return records.slice();
+    if (assignment.scope === "named") return findByNames(records, assignment.targetNames);
+    if (assignment.scope === "rows") return findByImageRows(records, assignment.targetRows);
+    return [];
+  }
+
+  function markAmbiguous(records, assignment, warnings) {
+    let targets = [];
+    if (assignment.targetNames.length) targets = findByNames(records, assignment.targetNames);
+    else if (assignment.targetRows.length) targets = findByImageRows(records, assignment.targetRows);
+    else targets = records.slice();
+
+    const values = assignment.values.length ? assignment.values : [assignment.value].filter(Boolean);
+    const message =
+      "文字中的" + assignmentLabel(assignment) + "无法确定对应关系" +
+      (values.length ? "（候选：" + values.join(" / ") + "）" : "");
+    if (!targets.length) pushUnique(warnings, message);
+    targets.forEach((record) => addRowIssue(record, message, assignment.field));
+  }
+
+  function applyAssignments(records, assignments, warnings, fieldFilter) {
+    assignments
+      .filter((assignment) => assignment && fieldFilter(assignment))
+      .sort((left, right) => {
+        const lp = left.scope === "ambiguous" ? -1 : SCOPE_PRIORITY[left.scope];
+        const rp = right.scope === "ambiguous" ? -1 : SCOPE_PRIORITY[right.scope];
+        return lp - rp || left.index - right.index;
+      })
+      .forEach((assignment) => {
+        if (assignment.scope === "ambiguous") {
+          markAmbiguous(records, assignment, warnings);
+          return;
+        }
+        if (assignment.field === "name" && assignment.scope !== "rows") {
+          pushUnique(warnings, "姓名纠正没有指向明确图片行，已忽略");
+          return;
+        }
+        if (assignment.scope === "ordered") {
+          const imageRecords = records.filter((record) => record._imageRow != null);
+          if (!imageRecords.length || assignment.values.length !== imageRecords.length) {
+            const message =
+              "文字中的" + assignmentLabel(assignment) + "顺序值数量与图片人员行数不一致";
+            pushUnique(warnings, message);
+            imageRecords.forEach((record) => addRowIssue(record, message, assignment.field));
+            return;
+          }
+          imageRecords.forEach((record, index) => applyValue(record, assignment, assignment.values[index]));
+          return;
+        }
+
+        const targets = targetsForAssignment(records, assignment);
+        if (!targets.length) {
+          pushUnique(
+            warnings,
+            "文字中的" + assignmentLabel(assignment) + "赋值找不到目标：" +
+              (assignment.targetNames.join("、") || assignment.targetRows.join("、") || assignment.scope),
+          );
+          return;
+        }
+        targets.forEach((record) => applyValue(record, assignment, assignment.value));
+      });
+  }
+
+  /**
+   * 把模型提取出的独立事实按固定工作流合并。这里才是业务规则的唯一实现：
+   * 图片建立基础行；文字姓名补齐缺失人员；文字赋值按 global < ordered < rows < named
+   * 从低到高覆盖。同等作用范围出现不同值时不猜，转成行级冲突。
+   */
+  function mergeExtraction(payload) {
+    const input = payload && typeof payload === "object" ? payload : {};
+    const warnings = [];
+    const hasWorkflowShape =
+      Array.isArray(input.imageRows) || Array.isArray(input.textPeople) || Array.isArray(input.assignments);
+    if (!hasWorkflowShape && Array.isArray(input.records)) {
+      return {
+        records: [],
+        warnings: ["模型返回了旧版 records 格式，未让它绕过本地工作流"],
+        unreadable: "模型返回了旧版格式，请重试一次。",
+      };
+    }
+
+    const imageRows = Array.isArray(input.imageRows) ? input.imageRows : [];
+    const records = imageRows
+      .filter((item) => item && typeof item === "object")
+      .map((item, index) => makeWorkflowRow(item, "image", index + 1));
+    const assignments = (Array.isArray(input.assignments) ? input.assignments : [])
+      .map((item, index) => normalizeAssignment(item, index, warnings))
+      .filter(Boolean);
+
+    // assignments.note 曾经被当成「不确定」并用在每一行上 —— 一次带 note 的 global
+    // 赋值就把整批标成需处理、谁也生成不了。表达不确定的唯一通道是 ambiguous，
+    // 所以这里的 note 一律不采用；真出现了就留一条线索，而不是静默丢掉。
+    assignments.forEach((assignment) => {
+      if (!assignment.droppedNote) return;
+      pushUnique(
+        warnings,
+        "第 " + (assignment.index + 1) + " 条文字赋值的 note 已忽略" +
+          "（存疑请改用 ambiguous 作用范围）：" + assignment.droppedNote,
+      );
+    });
+
+    // 姓名纠正必须先做，后续 named 赋值与 textPeople 才能命中纠正后的姓名。
+    applyAssignments(records, assignments, warnings, (assignment) => assignment.field === "name");
+
+    // 姓名被改掉后，其余赋值里那些从图片读来的姓名就成了旧名。
+    // 在这里把旧名改写成纠正后的姓名，让它们仍然指向同一个人，而不是各自新增一行。
+    // 只动得到 rows 纠正的那些行 —— 旧名匹配不到任何记录时保持原样，交给后面的兜底分支。
+    assignments.forEach((assignment) => {
+      if (assignment.field !== "name" || assignment.scope !== "rows") return;
+      const corrected = findByImageRows(records, assignment.targetRows).filter(
+        (record) => record._imageName && record.name !== record._imageName,
+      );
+      if (!corrected.length || !assignment.value) return;
+      assignments.forEach((other) => {
+        if (other === assignment) return;
+        other.targetNames = other.targetNames.map((name) =>
+          corrected.some((record) => normalizedName(record._imageName) === normalizedName(name))
+            ? assignment.value
+            : name,
+        );
+      });
+    });
+
+    const textPeople = Array.isArray(input.textPeople) ? input.textPeople : [];
+    textPeople.forEach((person) => {
+      if (!person || typeof person !== "object") return;
+      const name = clean(person.name);
+      if (!name) return;
+      const matches = findByNames(records, [name]);
+      const target = matches[0] || makeWorkflowRow({ name: name }, "text", null);
+      if (!matches.length) records.push(target);
+      const note = clean(person.note);
+      if (note) {
+        target.aiNote = [target.aiNote, note].filter(Boolean).join("；");
+      }
+    });
+
+    // 模型偶尔漏填 textPeople，但 named 的目标本身也是明确出现的姓名证据。
+    assignments.forEach((assignment) => {
+      if (assignment.scope !== "named") return;
+      assignment.targetNames.forEach((name) => {
+        if (findByNames(records, [name]).length) return;
+        const row = makeWorkflowRow({ name: name }, "text", null);
+        addRowIssue(row, "该姓名来自文字赋值目标，但模型未列入 textPeople，请核对", "name");
+        records.push(row);
+      });
+    });
+
+    applyAssignments(records, assignments, warnings, (assignment) => assignment.field !== "name");
+
+    records.forEach((record) => {
+      delete record._fieldRules;
+    });
+
+    return {
+      records: records,
+      warnings: warnings,
+      unreadable: clean(input.unreadable),
+    };
   }
 
   /**
@@ -372,18 +561,19 @@
    * @param {object} core window.CertCore（用它的 validateRecord）
    */
   function normalize(payload, core) {
-    const raw = payload && Array.isArray(payload.records) ? payload.records : [];
+    const merged = mergeExtraction(payload);
+    const raw = merged.records;
     const records = [];
 
     raw.forEach((item, index) => {
       if (!item || typeof item !== "object") return;
-      const note = String(item.note == null ? "" : item.note).trim();
+      const note = clean(item.aiNote != null ? item.aiNote : item.note);
 
       // 按 core 的约定构造：dateRaw 放原始字符串，validateRecord 自己解析
-      const dateRaw = String(item.date == null ? "" : item.date).trim();
+      const dateRaw = clean(item.dateRaw != null ? item.dateRaw : item.date);
       const base = {
-        name: String(item.name == null ? "" : item.name).trim(),
-        hospital: String(item.hospital == null ? "" : item.hospital).trim(),
+        name: clean(item.name),
+        hospital: clean(item.hospital),
         dateRaw: dateRaw,
       };
 
@@ -391,6 +581,10 @@
         throw new Error("cert-core 未加载，无法校验 AI 结果（不能跳过校验直接生成）。");
       }
       const validated = core.validateRecord(base);
+      const workflowIssues = Array.isArray(item.workflowIssues) ? item.workflowIssues : [];
+      workflowIssues.forEach((issue) => pushUnique(validated.issues, issue));
+      if (note) pushUnique(validated.issues, "AI 提取含存疑信息，请核对");
+      validated.status = validated.issues.length ? "invalid" : "ready";
 
       // 日期解析成功时，把展示用的 dateText 也补上（表格允许直接改这一列）
       const extra = {};
@@ -401,14 +595,17 @@
 
       records.push(Object.assign({}, validated, extra, {
         lineNo: index + 1,
-        selected: true,
+        selected: validated.status === "ready",
         aiNote: note,
+        aiSources: item.aiSources || {},
+        aiConflicts: Array.isArray(item.workflowConflicts) ? item.workflowConflicts.slice() : [],
       }));
     });
 
     return {
       records: records,
-      unreadable: String((payload && payload.unreadable) || "").trim(),
+      unreadable: merged.unreadable,
+      warnings: merged.warnings,
     };
   }
 
@@ -528,6 +725,7 @@
     return {
       records: normalized.records,
       unreadable: normalized.unreadable,
+      warnings: normalized.warnings,
       usage: payload.usage || null,
       raw: jsonText,
     };
@@ -586,7 +784,7 @@
     extractJsonText: extractJsonText,
     // 导出供测试覆盖「带图片」那条分支：extractRecords 里要 mock fetch 才走得到
     truncatedError: truncatedError,
-    parseDateLoose: parseDateLoose,
+    mergeExtraction: mergeExtraction,
     normalize: normalize,
     extractRecords: extractRecords,
     readImageFile: readImageFile,

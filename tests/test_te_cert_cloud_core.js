@@ -559,7 +559,10 @@ async function testAiExtraction() {
 
   // 官方要求：JSON Output 必须让提示词里出现 "json" 字样并给出格式示例
   check("提示词里出现了 json 字样", /json/i.test(ai.PROMPT));
-  check("提示词给了字段示例", /"records"/.test(ai.PROMPT));
+  check(
+    "提示词给了事实提取契约",
+    /"imageRows"/.test(ai.PROMPT) && /"textPeople"/.test(ai.PROMPT) && /"assignments"/.test(ai.PROMPT),
+  );
   check("提示词明确要求逐字照抄、不许补全", /照抄|不要补全|不要猜/.test(ai.PROMPT));
 
   // ---- 图片：必须放在 user 消息里（放 system/assistant 会被 400 拒绝）----
@@ -581,295 +584,250 @@ async function testAiExtraction() {
     typeof imgBody.messages[0].content === "string",
   );
 
-  // ---- 图片 + 文字混合：图片给姓名，文字按整批 / 分组 / 个人补医院和日期 ----
-  // 不能再把文字里的某一个值无条件套给所有人；多个医院/日期必须逐人或逐组匹配。
-  console.log("  --- 图 + 文混合（合并成同一个名单）---");
-  const mixed = ai.buildRequestBody({
-    text: "这几个人是南京鼓楼医院的，日期 2025年10月10日",
-    image: image,
-    model: "deepseek-flash",
-  });
-  const mixedContent = mixed.messages[1].content;
-  check("混合输入时 user content 仍是数组", Array.isArray(mixedContent));
+  console.log("  --- AI 只提取事实，代码执行工作流 ---");
+  check("提示词禁止模型输出最终 records", /不要输出最终 records/.test(ai.PROMPT));
   check(
-    "同时含文字块与图片块",
-    mixedContent.some((part) => part.type === "text") &&
-      mixedContent.some((part) => part.type === "image_url"),
-  );
-  const mixedText = (mixedContent.find((part) => part.type === "text") || {}).text || "";
-  check("user 消息里带上了用户输入的原文", mixedText.indexOf("南京鼓楼医院") >= 0);
-  check(
-    "user 消息点明了「图片是名单、文字是补充」的分工",
-    /图片/.test(mixedText) && /文字/.test(mixedText) && /合并/.test(mixedText),
-    mixedText.slice(0, 80),
-  );
-  check(
-    "user 消息明确要求「同一个人不要算两条」",
-    /不要[\s\S]{0,20}算两条/.test(mixedText) || /不要[\s\S]{0,12}重复/.test(mixedText),
-    mixedText.slice(-90),
+    "混合输入要求分别提取而不是让模型合并",
+    /分别输出图片行、文字人员与文字赋值/.test(
+      (ai.buildRequestBody({ text: "说明", image: image, model: "m" }).messages[1].content[0] || {}).text || "",
+    ),
   );
 
-  check(
-    "system 提示词要求医院/日期逐人或逐组匹配",
-    /按人|逐人/.test(ai.PROMPT) && /按组|分组/.test(ai.PROMPT),
-    "多个医院/日期不能再按整批一刀切",
+  const baseImage = [
+    { row: 1, name: "甲", hospital: "图片医院甲", date: "2022-10-20", note: "" },
+    { row: 2, name: "乙", hospital: "图片医院乙", date: "2022-10-20", note: "" },
+    { row: 3, name: "丙", hospital: "图片医院丙", date: "2022-10-20", note: "" },
+  ];
+
+  const globalOverride = ai.normalize(
+    {
+      imageRows: baseImage,
+      textPeople: [{ name: "甲" }, { name: "乙" }, { name: "丙" }],
+      assignments: [
+        { field: "date", value: "2026-01-12", scope: "global", targetNames: [], targetRows: [] },
+      ],
+    },
+    core,
   );
   check(
-    "system 提示词要求完整提取图片每行的姓名/医院/日期",
-    /逐行读取 name、hospital、date/.test(ai.PROMPT) &&
-      /不能因为常见图片只有姓名而忽略/.test(ai.PROMPT),
-    "图片可能本身就是完整表格，不能只读姓名",
+    "全局文字日期由代码整字段覆盖全部图片旧日期",
+    globalOverride.records.every((record) => record.dateRaw === "2026-01-12"),
+    JSON.stringify(globalOverride.records.map((record) => record.dateRaw)),
   );
   check(
-    "user 消息要求先建立完整图片基础表格",
-    /逐行提取图片中的姓名、医院和日期/.test(mixedText) && /基础表格/.test(mixedText),
-    mixedText.slice(-240),
-  );
-  check(
-    "system 提示词禁止多个值中的一个覆盖全表",
-    /不能任选一个值[\s\S]{0,12}覆盖全表|绝不能任选一个覆盖所有人/.test(ai.PROMPT),
-    "缺这条规则时模型容易只保留最后一个日期",
-  );
-  check(
-    "旧的整批共用规则已移除",
-    !/医院名称\/日期是\*\*整批人共用的\*\*/.test(ai.PROMPT) &&
-      !/医院名称与日期套用到图片里的每一位/.test(mixedText),
-    "这两句会把局部医院/日期错误扩大到所有人",
-  );
-  check(
-    "只有唯一且无分组迹象的字段才能全局套用",
-    /恰好只有一个[\s\S]{0,30}没有任何按人\/按组区分/.test(ai.PROMPT),
-    "单值可以作为默认值，多值必须判断归属",
-  );
-  check(
-    "医院与日期分别判断作用域",
-    /医院和日期要分别判断/.test(ai.PROMPT),
-    "医院可能全局相同，但日期仍可能按组不同",
-  );
-  check(
-    "多值归属不清时留空并标注",
-    /多个候选值但归属不清[\s\S]{0,120}保留图片原值[\s\S]{0,80}留空[\s\S]{0,30}note/.test(ai.PROMPT),
-    "已有图片值要保留；两边都没有才留空",
-  );
-  check(
-    "system 提示词禁止把医院/日期单独生成记录",
-    /不要[\s\S]{0,20}单独生成一条记录/.test(ai.PROMPT),
-    ai.PROMPT.slice(ai.PROMPT.indexOf("绝对不要") - 20, ai.PROMPT.indexOf("绝对不要") + 60),
-  );
-  check(
-    "system 提示词同时给了完整图片、局部修正、分组与歧义示例",
-    /示例三/.test(ai.PROMPT) && /示例四/.test(ai.PROMPT) &&
-      /示例五/.test(ai.PROMPT) && /示例六/.test(ai.PROMPT),
-  );
-  check(
-    "system 提示词以图片人员行为合并锚点并允许文字明确纠错",
-    /图片中的人员行是合并锚点/.test(ai.PROMPT) &&
-      /文字可以明确纠正某个人的姓名/.test(ai.PROMPT) &&
-      /同一个人不能因此变成两条/.test(ai.PROMPT),
-    "图片提供基础行，但文字应能纠正明确的 OCR 姓名错误",
-  );
-  check(
-    "user 消息要求逐人匹配且禁止覆盖所有人",
-    /逐人匹配/.test(mixedText) && /绝不能任选一个覆盖所有人/.test(mixedText),
-    mixedText.slice(-180),
+    "文字日期覆盖时不影响图片医院",
+    globalOverride.records.map((record) => record.hospital).join("|") ===
+      "图片医院甲|图片医院乙|图片医院丙",
   );
 
-  // ---- 图片与文字都有日期且不一致时，文字必须整字段覆盖 ----
-  // 真踩过两次：模型会去**比较**两个日期然后挑一个（实测挑了年份更小的），
-  // 把用户写的 26 年改成图片上的 22 年。上一轮改成"数据表 + 四步"时把这条规则丢了，
-  // 于是又发生一次 —— 这组断言就是防止再丢第三次。
-  console.log("  --- 图文日期冲突：文字整字段覆盖 ---");
-  check(
-    "禁止比较两个日期后挑一个，或改动它的任何一位",
-    /不要去比较、不要挑其中一部分、不要改动它的任何一位/.test(ai.PROMPT) &&
-      /不要拿它和图片里的值比较/.test(mixedText),
-    "只写「文字优先」还不够，模型会拿图片的年份和文字的月日拼起来",
+  const priority = ai.normalize(
+    {
+      imageRows: baseImage,
+      textPeople: [{ name: "甲" }, { name: "乙" }, { name: "丙" }],
+      assignments: [
+        { field: "date", value: "2026-01-01", scope: "global" },
+        { field: "date", value: "2026-02-02", scope: "rows", targetRows: [1, 2] },
+        { field: "date", value: "2026-03-03", scope: "named", targetNames: ["乙"] },
+      ],
+    },
+    core,
+  );
+  equal("代码优先级：分组覆盖全局", priority.records[0].dateRaw, "2026-02-02");
+  equal("代码优先级：明确姓名覆盖分组", priority.records[1].dateRaw, "2026-03-03");
+  equal("代码优先级：未命中分组的行保留全局值", priority.records[2].dateRaw, "2026-01-01");
+
+  const ordered = ai.normalize(
+    {
+      imageRows: baseImage,
+      textPeople: [],
+      assignments: [
+        {
+          field: "hospital",
+          scope: "ordered",
+          values: ["顺序医院甲", "顺序医院乙", "顺序医院丙"],
+        },
+      ],
+    },
+    core,
+  );
+  equal("顺序赋值第 1 行", ordered.records[0].hospital, "顺序医院甲");
+  equal("顺序赋值第 3 行", ordered.records[2].hospital, "顺序医院丙");
+
+  const ambiguous = ai.normalize(
+    {
+      imageRows: baseImage,
+      textPeople: [],
+      assignments: [
+        {
+          field: "date",
+          scope: "ambiguous",
+          values: ["2026-04-04", "2026-05-05"],
+          note: "原文未说明对应关系",
+        },
+      ],
+    },
+    core,
   );
   check(
-    "禁止把图片的年份搬进文字的日期",
-    /图片上的年份绝不能用来改文字里的年份/.test(ai.PROMPT),
-    "真实现象：26 年被图片上的 22 年替换",
+    "歧义赋值不覆盖图片原值",
+    ambiguous.records.every((record) => record.dateRaw === "2022-10-20"),
   );
   check(
-    "要求整字段替换，不许拼接两边的部分",
-    /整字段替换/.test(ai.PROMPT) && /拼起来|拼接/.test(ai.PROMPT),
-    "半拼接会产出既不是图片值也不是文字值的第三种日期",
+    "歧义赋值把相关行标为需处理且不自动选择",
+    ambiguous.records.every(
+      (record) => record.status === "invalid" && record.selected === false && /无法确定对应关系/.test(record.issues.join("")),
+    ),
   );
   check(
-    "点明两位年份各自独立换算，并说明图片是往期证书时最易犯",
-    /两位年份各自独立换算/.test(ai.PROMPT) && /往期证书时最容易犯这个错/.test(ai.PROMPT),
-    "模型会把图片年份当成整批的基准年份",
-  );
-  check(
-    "全局值只填进空字段，不覆盖图片里已有的值",
-    /只填进该字段为空的行/.test(ai.PROMPT) && /不覆盖图片里已有的值/.test(ai.PROMPT),
-  );
-  check(
-    "提示词给了图文日期冲突的完整示例",
-    /示例七/.test(ai.PROMPT) && /一行都不留/.test(ai.PROMPT),
-    "缺这个示例时，「文字优先」压不住模型去挑年份更小的",
-  );
-  check(
-    "示例点明图片上那个日期只是往期颁发",
-    /只说明这张图是往期的/.test(ai.PROMPT),
-    "不说清来源，模型会把图片日期当成同一批的另一份信息",
-  );
-  check(
-    "同时禁止了「一半一半」的错误做法",
-    /一半一半/.test(ai.PROMPT),
-    "日期取图片的、医院取文字的，是另一种会静默出错的结果",
-  );
-  check(
-    "user 消息也重申以文字为准、整字段替换",
-    /以文字为准、整字段替换/.test(mixedText),
-    mixedText.slice(-260),
+    "歧义冲突保留字段标签，供表格按字段解除",
+    ambiguous.records.every(
+      (record) => Array.isArray(record.aiConflicts) && record.aiConflicts[0].field === "date",
+    ),
   );
 
-  // ---- 合并流程本身：维护一张带 source 列的数据表，按四步推进 ----
-  // 这一组钉的是「流程结构」，而不是某句效果描述。之前那版是一串并列规则，
-  // 模型容易跳步、把文字里的值直接套给全表；改成显式的数据表流程后，
-  // 下面的断言保证后来者不会把结构化流程又拆回一堆散规则。
-  console.log("  --- 合并流程：数据表 + 四步 ---");
-  const stepAt = (n) => ai.PROMPT.indexOf(`第 ${n} 步`);
-  check(
-    "提示词要求维护一张数据表",
-    /维护一张.*数据表/.test(ai.PROMPT),
-    "没有统一的表，图片和文字就会各解析一遍然后并列输出",
+  const sameScopeConflict = ai.normalize(
+    {
+      imageRows: baseImage.slice(0, 1),
+      textPeople: [],
+      assignments: [
+        { field: "date", value: "2026-06-06", scope: "global" },
+        { field: "date", value: "2026-07-07", scope: "global" },
+      ],
+    },
+    core,
   );
-  check(
-    "数据表有 source 列，标明每行来自图片还是文字",
-    /source/.test(ai.PROMPT) && /来源（图片 \/ 文字）/.test(ai.PROMPT),
-    "source 是后来者追溯某行数据出处、以及判断覆盖方向的依据",
-  );
-  check(
-    "四个步骤按顺序出现，没有跳步",
-    stepAt(1) > 0 && stepAt(1) < stepAt(2) && stepAt(2) < stepAt(3) && stepAt(3) < stepAt(4) &&
-      stepAt(4) > 0,
-    [stepAt(1), stepAt(2), stepAt(3), stepAt(4)].join(", "),
-  );
-  check(
-    "第 1 步要求先看清表格结构，不预设图片只有姓名",
-    /先看清表格结构/.test(ai.PROMPT) && /不要预设图片只有姓名/.test(ai.PROMPT),
-    "图片可能就是完整表格，预设只有姓名会直接丢掉两列数据",
-  );
-  check(
-    "第 2 步是解析图片并填充数据表",
-    /解析图片，填充数据表/.test(ai.PROMPT) && /逐行读取/.test(ai.PROMPT),
-  );
-  check(
-    "第 3 步是解析文字并补充到对应行",
-    /解析文字/.test(ai.PROMPT) && /补充到对应行/.test(ai.PROMPT),
-    "文字是往已有行里补字段，不是重新建一张表",
-  );
-  check(
-    "第 4 步要求以填好的表为准输出，不许再凭印象补字段",
-    /对完整数据表做分析/.test(ai.PROMPT) &&
-      /不要在输出阶段再凭印象补字段或改变某行的归属/.test(ai.PROMPT),
-    "输出阶段再自由发挥，等于绕过前面三步的匹配结果",
-  );
-  check(
-    "内部数据表不得出现在输出的 json 里",
-    /数据表是你内部的推理过程/.test(ai.PROMPT) && /不要.*把它打印在 json 里/.test(ai.PROMPT),
-    "输出形状一旦多一个 table 字段，extractRecords 就取不到 records",
-  );
-  check(
-    "records 行数必须与数据表一致",
-    /records 的长度与数据表的行数一致/.test(ai.PROMPT),
-    "表里有几行就该出几条证书，不能多也不能少",
-  );
-  check(
-    "user 消息也指向同一套四步流程",
-    /四步流程/.test(mixedText) && /维护那张数据表/.test(mixedText),
-    mixedText.slice(-200),
-  );
+  equal("同级冲突不猜第二个值", sameScopeConflict.records[0].dateRaw, "2026-06-06");
+  check("同级冲突进入需处理", /两个同等范围/.test(sameScopeConflict.records[0].issues.join("")));
 
-  // 只有图片时不应出现「文字」相关的措辞
-  const imgOnly = ai.buildRequestBody({ text: "", image: image, model: "deepseek-flash" });
-  const imgOnlyText = imgOnly.messages[1].content.find((p) => p.type === "text").text;
-  check(
-    "只给图片时不出现「合并文字」的措辞",
-    !/补充说明/.test(imgOnlyText),
-    imgOnlyText,
+  const correctedName = ai.normalize(
+    {
+      imageRows: [{ row: 1, name: "甲错字", hospital: "图片医院", date: "2026-01-01" }],
+      textPeople: [{ name: "甲正确" }],
+      assignments: [{ field: "name", value: "甲正确", scope: "rows", targetRows: [1] }],
+    },
+    core,
   );
+  equal("文字可按图片行纠正 OCR 姓名", correctedName.records[0].name, "甲正确");
+  equal("姓名纠正后不会再新增重复人员", correctedName.records.length, 1);
 
-  // 文本两端空白不应影响判断（否则会被当成"有文字"）
-  const blank = ai.buildRequestBody({ text: "   \n  ", image: image, model: "deepseek-flash" });
-  const blankText = blank.messages[1].content.find((p) => p.type === "text").text;
-  check("纯空白文本按「只给图片」处理", !/补充说明/.test(blankText), JSON.stringify(blankText.slice(0, 40)));
+  // ---- 姓名纠正后，用「图片上的原名」做的点名赋值必须仍然命中同一个人 ----
+  // 模型是从图片读的姓名：它在 rows 里纠正了姓名，别处的 named 赋值却仍写着原名。
+  // 曾经的处理是「先纠正姓名、再应用其余赋值」，于是原名查不到 → 兜底分支新增一行，
+  // 一次改名变成两个人（第 2 行凭空多出来，还缺医院）。
+  const correctedWithNamed = ai.normalize(
+    {
+      imageRows: [{ row: 1, name: "甲错字", hospital: "图片医院", date: "2026-01-01" }],
+      textPeople: [{ name: "甲正确" }],
+      assignments: [
+        { field: "name", value: "甲正确", scope: "rows", targetRows: [1] },
+        { field: "date", value: "2026-09-09", scope: "named", targetNames: ["甲错字"] },
+      ],
+    },
+    core,
+  );
+  equal("姓名纠正不会被原名点名赋值拆成两行", correctedWithNamed.records.length, 1);
+  equal("纠正后的姓名保留", correctedWithNamed.records[0].name, "甲正确");
+  equal("原名点名赋值落在纠正后的那一行", correctedWithNamed.records[0].dateRaw, "2026-09-09");
+  equal("改名后图片医院仍在", correctedWithNamed.records[0].hospital, "图片医院");
+  equal(
+    "改名后没有多余的兜底警告",
+    correctedWithNamed.warnings.filter((w) => /未列入 textPeople/.test(w)).length,
+    0,
+  );
+  // textPeople 里写的是原名时，同样不能新增一行
+  const correctedTextPeople = ai.normalize(
+    {
+      imageRows: [{ row: 1, name: "甲错字", hospital: "图片医院", date: "2026-01-01" }],
+      textPeople: [{ name: "甲错字" }, { name: "乙" }],
+      assignments: [{ field: "name", value: "甲正确", scope: "rows", targetRows: [1] }],
+    },
+    core,
+  );
+  equal("textPeople 用原名也不会重复建行", correctedTextPeople.records.length, 2);
+  equal("被改名的行只出现一次", correctedTextPeople.records[0].name, "甲正确");
 
-  // ---- 提示词里绝对不能出现具体日期／机构名 ----
-  // 这是真踩过的坑：示例里写了「南京鼓楼医院 2025年10月10日」，模型把示例日期
-  // 当成真实信息套到了用户的数据上，产出一批日期错误的记录。
-  // 示例必须用占位符，不能有可被照抄的真实值。
-  //
-  // 两位数年份也必须拦：用户和图片里最常写的就是「26年1月12日」「22年10月20日」，
-  // 只查 \d{4} 会漏掉它们 —— 实测正是这个形态的示例值被模型照搬，
-  // 所以下面两种写法都要查。
-  console.log("  --- 提示词不能被示例数据污染 ---");
+  // ---- assignments.note 不是「存疑」通道，绝不能因此把整批标成需处理 ----
+  // 真实故障：模型给一条 global 日期赋值附了说明性 note，代码把它升级成行级 issue，
+  // 而 global 作用于所有行 —— 每一行都变成「需处理」，用户一步都走不下去。
+  const notedGlobal = ai.normalize(
+    {
+      imageRows: baseImage,
+      textPeople: baseImage.map((row) => ({ name: row.name })),
+      assignments: [
+        {
+          field: "date",
+          value: "2026-01-12",
+          scope: "global",
+          evidence: "文字：26年1月12日",
+          note: "文字说明称图片解析日期为22年10月20号，未指明具体人员或行",
+        },
+        {
+          field: "hospital",
+          value: "南京鼓楼医院",
+          scope: "global",
+          evidence: "文字：南京鼓楼医院",
+          note: "文字说明称图片解析医院是南京鼓楼医院，未指明具体人员或行",
+        },
+      ],
+    },
+    core,
+  );
+  check(
+    "带说明性 note 的全局赋值照常覆盖，不把整批标成需处理",
+    notedGlobal.records.every(
+      (record) => record.dateRaw === "2026-01-12" && record.hospital === "南京鼓楼医院",
+    ),
+    JSON.stringify(notedGlobal.records.map((record) => record.status)),
+  );
+  check(
+    "没有任何一行因为赋值 note 被拦下",
+    notedGlobal.records.every((record) => record.status === "ready" && record.selected === true),
+    JSON.stringify(notedGlobal.records.map((record) => record.issues)),
+  );
+  check(
+    "被忽略的 note 留一条线索（而不是静默丢掉）",
+    notedGlobal.warnings.some((w) => /note 已忽略/.test(w)),
+    JSON.stringify(notedGlobal.warnings),
+  );
+  // 真正的不确定仍然必须拦下：走 ambiguous
+  check(
+    "真存疑走 ambiguous 时依然拦下",
+    ambiguous.records.every((record) => record.status === "invalid"),
+  );
+  equal("assignments 提示词不再要求用 note 表达不确定", /写进对应 note/.test(ai.PROMPT), false);
+
+  const newPerson = ai.normalize(
+    {
+      imageRows: baseImage.slice(0, 1),
+      textPeople: [{ name: "文字新增" }],
+      assignments: [
+        { field: "hospital", value: "文字医院", scope: "named", targetNames: ["文字新增"] },
+        { field: "date", value: "2026-08-08", scope: "named", targetNames: ["文字新增"] },
+      ],
+    },
+    core,
+  );
+  equal("文字明确出现的新人员由代码补行", newPerson.records.length, 2);
+  equal("新人员的点名医院赋值生效", newPerson.records[1].hospital, "文字医院");
+
+  const legacy = ai.normalize(
+    { records: [{ name: "绕过", hospital: "旧格式医院", date: "2026-01-01" }] },
+    core,
+  );
+  equal("旧版最终 records 不能绕过本地工作流", legacy.records.length, 0);
+  check("旧版格式给出可重试提示", /旧版格式/.test(legacy.unreadable));
+
+  // ---- 提示词安全：不能混入可被模型照抄的真实示例值 ----
   const leakedDates = [
     ...(ai.PROMPT.match(/\d{4}[-/年]\d{1,2}[-/月]\d{1,2}/g) || []),
     ...(ai.PROMPT.match(/\d{1,2}\s*年\s*\d{1,2}\s*月\s*\d{1,2}\s*[日号]/g) || []),
   ];
+  equal("新提取提示词里没有具体日期", leakedDates.length, 0);
   check(
-    "提示词里没有任何具体日期（含两位数年份，防示例泄漏）",
-    leakedDates.length === 0,
-    "发现: " + JSON.stringify(leakedDates) + " —— 模型会把示例日期当成真实数据照抄",
-  );
-  check(
-    "提示词里没有具体机构名（示例已换成占位符）",
+    "新提取提示词里没有具体机构名",
     ["南京鼓楼医院", "北京协和医院", "上海市第六人民医院"].every(
       (name) => ai.PROMPT.indexOf(name) < 0,
     ),
-    "示例里写具体医院名会被照抄到结果里",
-  );
-  check(
-    "提示词声明了具体值都是占位符",
-    /占位符/.test(ai.PROMPT) && /不要照抄/.test(ai.PROMPT),
-  );
-  check(
-    "JSON 示例仍然合法（占位符在引号内）",
-    (() => {
-      const lines = ai.PROMPT.split("\n");
-      const jsonLine = lines.find((line) => line.indexOf('{"records"') === 0);
-      if (!jsonLine) return false;
-      try {
-        JSON.parse(jsonLine);
-        return true;
-      } catch {
-        return false;
-      }
-    })(),
-    "示例 json 不能被改成解析不了的形态，否则模型学不到格式",
-  );
-
-  // ---- 优先级：先确定文字的适用人群，再以文字覆盖这些人的图片字段 ----
-  console.log("  --- 文字按作用域覆盖图片，不能把局部值扩大到全体 ---");
-  check(
-    "提示词写明已匹配的文字信息优先于图片",
-    /已经匹配|匹配到[\s\S]{0,20}文字优先/.test(ai.PROMPT),
-    "必须先匹配归属，再谈文字优先级",
-  );
-  check(
-    "提示词区分人员行日期与图片背景日期",
-    /同一行\/同一列明确关联[\s\S]{0,20}正常提取/.test(ai.PROMPT) &&
-      /不属于任何人员数据行[\s\S]{0,10}才忽略/.test(ai.PROMPT),
-    "不能为了忽略模板日期而把表格里的真实日期也丢掉",
-  );
-  check(
-    "文字未涉及的图片字段必须保留",
-    /文字没有明确涉及的字段必须保留图片基础表格中的原值/.test(ai.PROMPT) &&
-      /文字未涉及的图片字段不变/.test(mixedText),
-    "局部修正不能清空其他人的完整图片数据",
-  );
-  check(
-    "提示词只信任明确绑定到个人或小组的文字字段",
-    /明确绑定到这个人或其小组/.test(ai.PROMPT),
-    "不能把未说明归属的文字值当作已确认",
-  );
-  check(
-    "user 消息里也重申了多值不得全局覆盖",
-    /多个医院或多个日期/.test(mixedText) && /覆盖所有人/.test(mixedText),
-    mixedText.slice(-80),
   );
 
   // ---- extractJsonText：官方明确说 JSON Output 偶尔返回空内容 ----
@@ -958,7 +916,11 @@ async function testAiExtraction() {
 
   // ---- normalize：必须复用 core 的校验，不能自己写一套 ----
   const good = ai.normalize(
-    { records: [{ name: "靳睿", hospital: "南京鼓楼医院", date: "2025-10-10", note: "" }] },
+    {
+      imageRows: [{ name: "靳睿", hospital: "南京鼓楼医院", date: "2025-10-10", note: "" }],
+      textPeople: [],
+      assignments: [],
+    },
     core,
   );
   equal("正常记录可生成", good.records[0].status, "ready");
@@ -979,7 +941,7 @@ async function testAiExtraction() {
   console.log("  --- 缺项必须标红，绝不静默通过 ---");
   const bad = ai.normalize(
     {
-      records: [
+      imageRows: [
         { name: "", hospital: "某医院", date: "2025-10-10" },
         { name: "张三", hospital: "", date: "2025-10-10" },
         { name: "李四", hospital: "某医院", date: "" },
@@ -1003,34 +965,58 @@ async function testAiExtraction() {
 
   // ---- AI 的存疑备注要保留下来，供人工核对 ----
   const noted = ai.normalize(
-    { records: [{ name: "欧阳娜娜", hospital: "某医院", date: "2026-06-04", note: "「娜」字略模糊" }] },
+    {
+      imageRows: [
+        { name: "欧阳娜娜", hospital: "某医院", date: "2026-06-04", note: "「娜」字略模糊" },
+      ],
+      textPeople: [],
+      assignments: [],
+    },
     core,
   );
   equal("aiNote 被保留", noted.records[0].aiNote, "「娜」字略模糊");
   check(
-    "aiNote 不并进 issues（它是「不确定」而非「不合法」）",
-    noted.records[0].issues.length === 0 && noted.records[0].status === "ready",
+    "aiNote 会阻止存疑记录自动进入生成队列",
+    noted.records[0].issues.length > 0 && noted.records[0].status === "invalid" && !noted.records[0].selected,
     JSON.stringify(noted.records[0].issues),
   );
 
   // ---- 脏数据不能把整批搞崩 ----
-  equal("records 不是数组时返回空", ai.normalize({ records: "x" }, core).records.length, 0);
+  equal(
+    "imageRows 不是数组时返回空",
+    ai.normalize({ imageRows: "x", textPeople: [], assignments: [] }, core).records.length,
+    0,
+  );
   equal(
     "数组里的 null 被跳过",
-    ai.normalize({ records: [null, { name: "甲", hospital: "乙医院", date: "2025-1-2" }] }, core)
-      .records.length,
+    ai.normalize(
+      {
+        imageRows: [null, { name: "甲", hospital: "乙医院", date: "2025-1-2" }],
+        textPeople: [],
+        assignments: [],
+      },
+      core,
+    ).records.length,
     1,
   );
   equal(
     "unreadable 透传",
-    ai.normalize({ records: [], unreadable: "图片太模糊" }, core).unreadable,
+    ai.normalize({ imageRows: [], textPeople: [], assignments: [], unreadable: "图片太模糊" }, core)
+      .unreadable,
     "图片太模糊",
   );
 
   // ---- core 缺失时必须抛错，而不是跳过校验 ----
   let threw = false;
   try {
-    ai.normalize({ records: [{ name: "甲", hospital: "乙", date: "2025-1-1" }] }, null);
+    ai.normalize(
+      {
+        imageRows: [{ name: "甲", hospital: "乙", date: "2025-1-1" }],
+        textPeople: [],
+        assignments: [],
+      },
+      null,
+    );
   } catch {
     threw = true;
   }
