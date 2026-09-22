@@ -45,6 +45,23 @@
   /** 提示词里的字段名，改这里要同步改 PROMPT 与 normalize */
   const FIELDS = ["name", "hospital", "date", "note"];
 
+  /**
+   * 输出预算与思考模式的默认值。
+   *
+   * 4096 这个旧默认值本身就是「模型输出被长度限制截断」的根因，不是名单太长：
+   * DeepSeek 的思考模式**默认开启且思考力度默认 high**（见官方 Thinking Mode 文档），
+   * 而思考 token 与正文共用 max_tokens —— 4096 很可能被思考吃光，正文一个字都没轮上
+   * （表现为 content 为空 + finish_reason=length）。
+   *
+   * 两个默认值配合着看：max_tokens 给足（非流式非思考模式官方默认 8K，思考模式 64K），
+   * 思考模式显式关掉。抽名单不需要长链推理，关掉能把预算全留给正文；
+   * 需要更强推理时可以打开，那时 max_tokens 也够用。
+   *
+   * 各服务商通用：OpenAI 兼容接口会忽略不认识的 thinking 字段。
+   */
+  const MAX_OUTPUT_TOKENS = 32768;
+  const THINKING_TYPE = "disabled";
+
   const PROMPT = [
     "你是证书名单的信息抽取器。从用户给的材料里抽出「颁发证书」所需的三项信息。",
     "",
@@ -251,8 +268,10 @@
       ],
       // JSON Output：必须同时满足「提示词里出现 json 字样」+ 给出格式示例
       response_format: { type: "json_object" },
-      // 给足余量，避免 json 被截断成半个对象
-      max_tokens: options.maxTokens || 4096,
+      // 给足余量，避免 json 被截断成半个对象（详见 MAX_OUTPUT_TOKENS 的说明）
+      max_tokens: options.maxTokens || MAX_OUTPUT_TOKENS,
+      // 思考 token 与正文共用 max_tokens，抽名单不需要长链推理，关掉更稳
+      thinking: { type: THINKING_TYPE },
       temperature: 0,
       stream: false,
     };
@@ -261,9 +280,31 @@
   /* ------------------------------------------------------------ 响应处理 */
 
   /**
+   * 输出被长度限制截断时的报错。
+   *
+   * 必须说清两件事，否则用户会照着旧文案去"分批解析"，而根因根本不在名单长度：
+   *   1. 这是输出预算被用完了（思考 token 与正文共用同一份额度）；
+   *   2. 带图片时要明确"图片没法分批"——旧文案让人把照片分两半上传，是做不到的。
+   */
+  function truncatedError(hasImage, maxTokens) {
+    return new Error(
+      "模型输出被长度限制截断了（finish_reason=length）——" +
+        "输出预算 " + (maxTokens || MAX_OUTPUT_TOKENS) + " token 被用完，正文没有生成完整。" +
+        "如果是名单很长，请分批解析" +
+        (hasImage
+          ? "（图片没法分批，可以把签到表分几段拍、或每个部门一张图，分几次解析后追加结果）。"
+          : "（按行拆成几段，分几次解析，结果会自动追加到表格里）。"),
+    );
+  }
+
+  /**
    * 从模型返回里取出 json 文本。
    * 官方文档明确提到 JSON Output 偶尔会返回空内容，所以空内容要给可操作的提示，
    * 而不是让 JSON.parse 抛一句没头没尾的错。
+   *
+   * 这里**不做**截断处理：`extractRecords` 会在调用它之前就按 finish_reason 抛错，
+   * 因为那里才知道调用方的输入形态（有没有图片），文案才给得准。
+   * 下面这个分支只作为兜底 —— 直接调用本函数时不该拿到截断的响应。
    */
   function extractJsonText(payload) {
     const choice = payload && payload.choices && payload.choices[0];
@@ -272,9 +313,7 @@
     if (typeof content !== "string" || !content.trim()) {
       const finish = choice && choice.finish_reason;
       if (finish === "length") {
-        throw new Error(
-          "模型输出被长度限制截断了（finish_reason=length）。名单太长，请分批解析。",
-        );
+        throw truncatedError(false, null);
       }
       throw new Error(
         "模型返回了空内容。这是 JSON Output 的已知偶发问题，重试一次通常就好了。",
@@ -441,7 +480,22 @@
       );
     }
 
+    // 截断检查必须在取正文和 JSON.parse **之前**，两个原因：
+    //   1. 被截断的 json 解析出来是半个对象，走到 parse 只会得到一句
+    //      "不是合法 json"+200 字乱码，把真正的原因盖掉（官方文档也提醒过
+    //      finish_reason="length" 时 content 可能被截断）；
+    //   2. 截断时 content 可能直接为空，那样会先撞上 extractJsonText 里的
+    //      "空内容"分支，拿到一句不含输入形态的兜底文案 —— 带图片的用户就会
+    //      被建议去"按行拆分"，而照片根本没法拆。
+    // 放在这里还能拿到真实的调用形态（有没有图片），文案才给得准。
+    const finishReason =
+      payload.choices && payload.choices[0] && payload.choices[0].finish_reason;
+    if (finishReason === "length") {
+      throw truncatedError(Boolean(image), body.max_tokens);
+    }
+
     const jsonText = extractJsonText(payload);
+
     let parsed;
     try {
       parsed = JSON.parse(jsonText);
@@ -506,10 +560,13 @@
     FIELDS: FIELDS,
     PROMPT: PROMPT,
     MAX_IMAGE_BYTES: MAX_IMAGE_BYTES,
+    MAX_OUTPUT_TOKENS: MAX_OUTPUT_TOKENS,
     ALLOWED_IMAGE_TYPES: ALLOWED_IMAGE_TYPES,
     getProvider: getProvider,
     buildRequestBody: buildRequestBody,
     extractJsonText: extractJsonText,
+    // 导出供测试覆盖「带图片」那条分支：extractRecords 里要 mock fetch 才走得到
+    truncatedError: truncatedError,
     parseDateLoose: parseDateLoose,
     normalize: normalize,
     extractRecords: extractRecords,

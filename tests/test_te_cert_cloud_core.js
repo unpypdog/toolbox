@@ -17,6 +17,9 @@ const TOOL = path.join(__dirname, "..", "tools", "te-cert-generator");
 const core = require(path.join(TOOL, "cert-core.js"));
 const cloud = require(path.join(TOOL, "cert-cloud.js"));
 const merge = require(path.join(TOOL, "cert-merge.js"));
+// 放在模块级而不是 testAiExtraction 内部：testTruncationEndToEnd 是同级的独立函数，
+// 写在函数里它取不到，只会报一句 "ai is not defined"。
+const ai = require(path.join(TOOL, "cert-ai.js"));
 
 let passed = 0;
 const failures = [];
@@ -414,12 +417,134 @@ function testOutputNaming() {
   );
 }
 
+/* ------------------------------------------------------- 6b. 截断的端到端路径 */
+
+/**
+ * extractRecords 里那条截断检查，靠 stub fetch 才能走到。
+ *
+ * 为什么值得单独测：这个检查必须发生在 extractJsonText **之前**。
+ * 截断时 content 可能直接是空串，那样会先撞上"空内容"分支，拿到一句不含输入形态
+ * 的兜底文案 —— 带图片的用户就会被建议去"按行拆分"，而照片根本没法拆。
+ * 只测 truncatedError 是看不出这个顺序问题的。
+ */
+async function testTruncationEndToEnd() {
+  console.log("  --- 截断：走真实的 extractRecords 路径 ---");
+
+  const realFetch = globalThis.fetch;
+  let lastBody = null;
+
+  /** 让 fetch 返回一个 finish_reason=length 的"被截断"响应 */
+  function stubFetch(content) {
+    globalThis.fetch = async (_url, init) => {
+      lastBody = JSON.parse(init.body);
+      return {
+        ok: true,
+        status: 200,
+        text: async () =>
+          JSON.stringify({
+            choices: [{ message: { content: content }, finish_reason: "length" }],
+            usage: { completion_tokens: 32768 },
+          }),
+      };
+    };
+  }
+
+  const call = (extra) =>
+    ai.extractRecords(
+      Object.assign(
+        {
+          apiKey: "sk-test",
+          model: "deepseek-flash",
+          endpoint: "https://example.invalid/chat/completions",
+          core: core,
+          text: "靳睿、耿楠",
+        },
+        extra,
+      ),
+    );
+
+  try {
+    // 截断但正文非空：旧代码会走到 JSON.parse，报"不是合法 json"+乱码
+    stubFetch('{"records":[{"name":"靳睿"');
+    let err = null;
+    try {
+      await call({});
+    } catch (error) {
+      err = error;
+    }
+    check("正文被截断时报的是输出预算问题，而不是「不是合法 json」", Boolean(err), "没有抛错");
+    // 注意 detail 要写成 err ? err.message : ...
+    // 直接写 `err && err.message` 时，条件里已经判过 err 为真，
+    // 一旦条件失败 detail 反而会因为 err 为 null 触发别的异常，把真正的原因盖掉。
+    const detailOf = (e) => (e ? e.message : "没有抛错");
+    check(
+      "报错里不含「不是合法 json」这种误导性措辞",
+      Boolean(err) && !/不是合法 json/.test(err.message),
+      detailOf(err),
+    );
+    check(
+      "报错点明是输出预算（并带上真实预算数字）",
+      Boolean(err) && /预算/.test(err.message) && /32768/.test(err.message),
+      detailOf(err),
+    );
+    // 请求里必须真的把预算和思考开关送出去了，否则改了默认值也白搭
+    equal("请求真的带上了 32768 的预算", lastBody.max_tokens, 32768);
+    equal("请求真的关掉了思考模式", lastBody.thinking.type, "disabled");
+
+    // 截断且正文为空：这条最容易被顺序问题坑 —— 会先撞"空内容"分支
+    stubFetch("");
+    err = null;
+    try {
+      await call({ image: { base64: "AAAA", mime: "image/jpeg" } });
+    } catch (error) {
+      err = error;
+    }
+    check(
+      "空正文 + 带图片时，给的是「图片没法分批」而不是「按行拆分」",
+      Boolean(err) && /图片没法分批/.test(err.message) && !/按行拆/.test(err.message),
+      detailOf(err),
+    );
+
+    stubFetch("");
+    err = null;
+    try {
+      await call({});
+    } catch (error) {
+      err = error;
+    }
+    check(
+      "空正文 + 纯文本时，给的才是「按行拆分」",
+      Boolean(err) && /按行拆/.test(err.message),
+      detailOf(err),
+    );
+
+    // 反向确认：非截断的空内容仍走原来的"重试一次"提示，别被截断逻辑吞掉
+    globalThis.fetch = async () => ({
+      ok: true,
+      status: 200,
+      text: async () =>
+        JSON.stringify({ choices: [{ message: { content: "" }, finish_reason: "stop" }] }),
+    });
+    err = null;
+    try {
+      await call({});
+    } catch (error) {
+      err = error;
+    }
+    check(
+      "非截断的空内容仍提示「重试一次」",
+      Boolean(err) && /重试/.test(err.message) && !/预算/.test(err.message),
+      detailOf(err),
+    );
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+}
+
 /* ------------------------------------------------------------- 6. AI 抽取 */
 
-function testAiExtraction() {
+async function testAiExtraction() {
   console.log("\n[6] AI 抽取：请求形状与校验复用");
-
-  const ai = require(path.join(TOOL, "cert-ai.js"));
 
   // ---- 请求体形状：错了只会在运行时炸，而这里没有真实 key 可测 ----
   const textBody = ai.buildRequestBody({ text: "靳睿 南京鼓楼医院 2025-10-10", model: "deepseek-flash" });
@@ -706,11 +831,72 @@ function testAiExtraction() {
   }
   check("截断时提示分批", /截断|长度/.test(message), message);
 
+  // ---- 输出预算：4096 太小是「被截断」的真正根因，不是名单太长 ----
+  // DeepSeek 思考模式默认开启且力度默认 high，思考 token 与正文共用 max_tokens：
+  // 4096 会被思考吃光，正文一个字都没轮上，表现就是 content 空 + finish_reason=length。
+  const DEFAULT_BUDGET = textBody.max_tokens;
+  check(
+    "默认输出预算不再是 4096（思考 token 会把它吃光）",
+    DEFAULT_BUDGET >= 16384,
+    "实际 " + DEFAULT_BUDGET,
+  );
+  check(
+    "输出预算不超过 1..384K 的接口上限",
+    DEFAULT_BUDGET >= 1 && DEFAULT_BUDGET <= 393216,
+    "越界会被接口直接 400 拒绝，实际 " + DEFAULT_BUDGET,
+  );
+  check(
+    "显式关掉思考模式，把预算全留给正文",
+    textBody.thinking && textBody.thinking.type === "disabled",
+    JSON.stringify(textBody.thinking),
+  );
+  equal(
+    "调用方仍可覆盖输出预算",
+    ai.buildRequestBody({ text: "张三", model: "m", maxTokens: 1024 }).max_tokens,
+    1024,
+  );
+  check(
+    "关思考模式不影响其它 OpenAI 兼容服务（对方忽略不认识的字段）",
+    Boolean(ai.buildRequestBody({ text: "张三", model: "m" }).thinking),
+    "该字段必须始终存在，否则只有 DeepSeek 能跑",
+  );
+
+  // 截断文案必须区分「图片没法分批」——旧文案让人把照片分两半上传，做不到
+  message = "";
+  try {
+    ai.extractJsonText({ choices: [{ message: { content: "  " }, finish_reason: "length" }] });
+  } catch (error) {
+    message = error.message;
+  }
+  check("截断文案点明是输出预算用完了，而不是笼统说名单太长", /预算/.test(message), message);
+  check(
+    "不带图片时教用户按行拆分并说明结果会自动追加",
+    /按行拆/.test(message) && /追加/.test(message),
+    message,
+  );
+  const imgTrunc = ai.truncatedError(true, 32768).message;
+  check(
+    "带图片时明说图片没法分批（否则用户会去把照片切两半）",
+    /图片没法分批/.test(imgTrunc) && /分几次解析/.test(imgTrunc),
+    imgTrunc,
+  );
+  check(
+    "带图片与不带图片给出的是两套不同的建议",
+    imgTrunc !== ai.truncatedError(false, 32768).message,
+  );
+  check(
+    "截断文案带上实际预算数字，便于判断该调多大",
+    /32768/.test(ai.truncatedError(false, 32768).message),
+  );
+
   equal(
     "能剥掉 markdown 代码块",
     ai.extractJsonText({ choices: [{ message: { content: "```json\n{\"a\":1}\n```" } }] }),
     '{"a":1}',
   );
+
+  // ---- 截断的端到端路径：要放在 const ai 之后（函数体里会用到它）----
+  await testTruncationEndToEnd();
 
   // ---- normalize：必须复用 core 的校验，不能自己写一套 ----
   const good = ai.normalize(

@@ -43,9 +43,9 @@ toolbox/
     └── test_te_cert_dom_smoke.js         # 证书工具 DOM 冒烟（最小 DOM 桩）
 ```
 
-### te-cert-generator 的十二条硬约束
+### te-cert-generator 的十三条硬约束
 
-改这个工具前先读这十二条，都是踩过的坑：
+改这个工具前先读这十三条，都是踩过的坑：
 
 1. **模板改了必须重跑载荷**：`node tools/te-cert-generator/build-templates.js`。
    `file://` 下 Chromium 拒绝 fetch 同目录的 docx，模板只能靠 base64 载荷用
@@ -135,6 +135,21 @@ toolbox/
     `{"records":[...],"unreadable":""}`，多一个字段 `extractRecords` 就取不到数据。
     护栏在 `test_te_cert_cloud_core.js` 的 `[6]` 节，钉住四步的顺序、`source` 列、
     「不许把表打印进 json」以及上面那两条易错点。
+
+13. **`max_tokens` 不能小、思考模式必须显式关掉，截断检查必须在 `JSON.parse` 之前**。
+    这三条是同一次故障的三个面，别只改一个：
+    DeepSeek 的**思考模式默认开启、思考力度默认 high**，而**思考 token 与正文共用
+    `max_tokens`**。所以旧的 `max_tokens: 4096` 会被思考吃光，正文一个字都没轮上 ——
+    现象是 `content` 为空 + `finish_reason=length`，报错却写成「名单太长，请分批解析」，
+    把用户引向完全错误的方向（照片根本没法分批）。
+    现在固定：`MAX_OUTPUT_TOKENS = 32768`（接口上限 1..384K，非思考模式官方默认 8K）+
+    `thinking: {type:"disabled"}`（抽名单不需要长链推理，预算全留给正文）。
+    换模型或想提高推理力度时，这两个值要一起动。
+    另外**截断检查必须放在 `JSON.parse` 之前**：被截断的 json 解析出来是半个对象，
+    走到 parse 只会得到「模型输出的不是合法 json」+200 字乱码，真正的原因被盖掉。
+    护栏在 `test_te_cert_cloud_core.js` 的 `[6]` 节：默认预算下限、接口上限、
+    `thinking` 已关、可被 `options.maxTokens` 覆盖、以及「带图片的截断文案必须
+    说明图片没法分批」。
 
 
 ### te-cert-generator 参考资料：字体与姓名框几何
