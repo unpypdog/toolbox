@@ -83,7 +83,7 @@ def overflow_px(page):
     )
 
 
-EXPECTED_TITLE = "操作培训证书批量填充"
+EXPECTED_TITLE = "操作证书考试账号批量导入"
 
 REQUIRED_IDS = (
     "fileInput", "apiBaseInput", "usernameInput", "passwordInput", "connectBtn",

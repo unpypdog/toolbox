@@ -1094,9 +1094,17 @@ footer {
   }
 }
 
-@media (max-width: 430px) {
+/* 标题「操作证书考试账号批量导入」是 12 个字（旧名 10 个字），断点与字号要一起动：
+   390px 下 .brand-copy 的可用宽度只有 284px，12 字在 24.18px 字号 + 0.08em 字距下
+   要约 313px，必然折行 —— Test 14b 数行盒断言钉着这条，而 overflow 断言查不出来。
+   断点从 430px 提到 700px（与上面 .masthead 的窄版式同断点）不是随手扩大：
+   刚过 430px 时基础规则把字号拉回 26.4px，12 字要 342px，而 431–450px 区间
+   可用宽度还不够，会折成「314 + 29」的孤字行（旧的 10 字名只需 285px，一直没暴露）。
+   实测 320 / 360 / 375 / 390 / 414 / 430 / 431 / 450 / 500 / 600 / 700px 均单行。 */
+@media (max-width: 700px) {
   .brand-copy h1 {
-    font-size: clamp(1.35rem, 6.2vw, 1.65rem);
+    font-size: clamp(1rem, 5vw, 1.65rem);
+    letter-spacing: 0.05em;
     text-wrap: balance;
   }
 }

@@ -14,7 +14,7 @@ toolbox/
 │   │   └── index.html
 │   ├── tax-calc/           # 税点计算器
 │   │   └── index.html
-│   ├── training-cert-batch-fill/   # 操作培训证书批量填充
+│   ├── training-cert-batch-fill/   # 操作证书考试账号批量导入
 │   │   ├── index.html
 │   │   ├── app.js
 │   │   ├── styles.css

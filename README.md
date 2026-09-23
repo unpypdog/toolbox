@@ -13,7 +13,7 @@ toolbox/
 │   ├── lung-marker/        # 支气管分段标记
 │   ├── rmb-upper/          # 人民币大写转换
 │   ├── tax-calc/           # 税点计算器
-│   ├── training-cert-batch-fill/  # 操作培训证书批量填充
+│   ├── training-cert-batch-fill/  # 操作证书考试账号批量导入
 │   └── te-cert-generator/  # TE 培训证书批量生成
 └── tests/                  # 测试
 ```
@@ -50,7 +50,7 @@ node tests/test_te_cert_dom_smoke.js
 | 支气管分段标记 | `tools/lung-marker/` | 右下叶基底段顺序标记，支持后悔模式 |
 | 税点计算器 | `tools/tax-calc/` | 含税金额 ÷ 税率，一键算税前与税额 |
 | 人民币大写转换 | `tools/rmb-upper/` | 数字金额转大写，符合央行规范 |
-| 操作培训证书批量填充 | `tools/training-cert-batch-fill/` | 本地解析 CSV/Excel，批量新增用户 |
+| 操作证书考试账号批量导入 | `tools/training-cert-batch-fill/` | 本地解析 CSV/Excel，批量新增考试账号 |
 | TE 培训证书批量生成 | `tools/te-cert-generator/` | 输入名单即可出证书，PDF 可完全离线生成，也可选云转换 |
 
 ### TE 培训证书批量生成
