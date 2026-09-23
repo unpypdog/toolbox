@@ -15,3 +15,10 @@ wheels/
 # 证书工具的工作目录：参考 PDF、拆包出来的 docx 部件与生成产物。
 # tests/test_te_cert_direct_pdf_browser.py 每次运行都会重建它。
 .tmp-cert-experiment/
+
+# 本地的过程笔记（只放在仓库根目录，不跟着代码走）。
+# 用 / 前缀锚定根目录：这些是通用的文件名，不锚定会把将来任何
+# 子目录下的同名文件一并忽略掉，那种"文件怎么提交不上去"很难查。
+/findings.md
+/progress.md
+/task_plan.md
