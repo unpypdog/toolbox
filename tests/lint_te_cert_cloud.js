@@ -93,6 +93,12 @@ const scripts = (indexHtml.match(/<script[^>]*src="([^"]+)"/g) || []).map((t) =>
 );
 check("页面引用了 cert-cloud.js", scripts.includes("./cert-cloud.js"), scripts.join(", "));
 check("页面引用了 cert-ai.js", scripts.includes("./cert-ai.js"), scripts.join(", "));
+check("页面引用了本地直接 PDF 模块", scripts.includes("./cert-direct-pdf.js"), scripts.join(", "));
+check("页面从本地 vendor 加载 pdf-lib", scripts.includes("./vendor/pdf-lib.min.js"), scripts.join(", "));
+check(
+  "pdf-lib 的 MIT 许可证随 vendor 文件保留",
+  fs.existsSync(path.join(TOOL, "vendor", "pdf-lib.LICENSE.md")),
+);
 check(
   "已移除旧的 cert-pdf.js 引用",
   !scripts.includes("./cert-pdf.js"),
@@ -119,6 +125,7 @@ check(
 // （在 DOM 冒烟测试的桩里踩过一次：没注入 CertAi 时 AI 面板整块不出现。）
 const globalModules = [
   { global: "CertCore", file: "cert-core.js" },
+  { global: "CertDirectPdf", file: "cert-direct-pdf.js" },
   { global: "CertCloud", file: "cert-cloud.js" },
   { global: "CertAi", file: "cert-ai.js" },
 ];
@@ -201,14 +208,19 @@ console.log("\n[3] 关键函数与导出");
 check("app.js 有 generatePdf", /async function generatePdf\(/.test(appJs));
 check("app.js 有 collectCloudCredentials", /function collectCloudCredentials\(/.test(appJs));
 check("app.js 有 restoreCloudSettings", /function restoreCloudSettings\(/.test(appJs));
-check("app.js 不再引用 pdf-lib", !/pdfLibs|PDFLib|CertPdf/.test(appJs));
+check("app.js 接入本地直接 PDF 模块", /window\.CertDirectPdf\.generateBatch/.test(appJs));
 check("app.js 不再有打印预览残留", !/window\.print\(|printRoot/.test(appJs));
 
 // cert-cloud 的导出必须覆盖 app.js 实际用到的接口。
 // 用真实的模块导出对象来断言，而不是拿正则去抠源码 —— 源码里有嵌套的 `};`，
 // 正则很容易截断，那样这个检查会变成「看起来在查、其实查不到」。
 const cloudModule = require(path.join(TOOL, "cert-cloud.js"));
+const directPdfModule = require(path.join(TOOL, "cert-direct-pdf.js"));
 const mergeModule = require(path.join(TOOL, "cert-merge.js"));
+
+for (const api of ["PROVIDER_ID", "MAX_BATCH", "generateBatch", "resolveSlot"]) {
+  check("cert-direct-pdf 导出 " + api, typeof directPdfModule[api] !== "undefined", "实际类型: " + typeof directPdfModule[api]);
+}
 
 for (const api of ["PROVIDERS", "MAX_BATCH", "getProvider", "convertBatch", "buildBatchDocx", "repackWithDocumentXml"]) {
   check("cert-cloud 导出 " + api, typeof cloudModule[api] !== "undefined", "实际类型: " + typeof cloudModule[api]);
@@ -257,18 +269,17 @@ for (const provider of cloudModule.PROVIDERS) {
 console.log("\n[4] 隐私说明不能自相矛盾");
 
 check(
-  "页面不再宣称「不上传」（PDF 会外发）",
-  !/不上传|不会离开这台设备|不会离开本机/.test(indexHtml),
-  "还残留「不上传」类措辞，与云转换功能矛盾",
+  "本地直接生成明确说明不联网",
+  /完全离线|不联网/.test(indexHtml) && /不会发出网络请求|完全本地处理/.test(appJs),
 );
 check(
   "页面明确提示会外发给所选服务",
   /发送给|会发送|外发/.test(indexHtml) || /发送给|外发/.test(appJs),
 );
 check(
-  "云服务默认值是不转换",
-  /none\.textContent = "不转换/.test(appJs),
-  "默认不能预选任何云服务商",
+  "默认不选择任何 PDF 生成方式",
+  /cloudProvider:\s*""/.test(appJs) && /none\.value = ""/.test(appJs),
+  "默认不能预选本地或云端方式",
 );
 check(
   "代码里有「密钥只存本机」的说明",

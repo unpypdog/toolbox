@@ -23,6 +23,7 @@ toolbox/
 │       ├── index.html
 │       ├── app.js
 │       ├── cert-core.js            # 模板填充、ZIP、日期解析（无网络）
+│       ├── cert-direct-pdf.js      # 固定背景 + Canvas 文字的离线 PDF 生成
 │       ├── cert-cloud.js           # 云端 DOCX→PDF 适配层（浏览器直连）
 │       ├── cert-ai.js              # AI 名单抽取（OpenAI 兼容接口，支持图片）
 │       ├── cert-merge.js           # PDF 合并（备用工具，页面未加载，见文件头说明）
@@ -30,6 +31,7 @@ toolbox/
 │       ├── build-templates.js      # docx → base64 载荷（改了 docx 必须重跑）
 │       ├── template-*.docx         # 证书模板
 │       ├── template-*.b64.js       # 模板载荷（file:// 下靠它读模板）
+│       ├── vendor/pdf-lib.min.js   # 本地 PDF 组装库（含 MIT 许可）
 │       └── xlsx.full.min.js
 └── tests/                  # 测试文件
     ├── screenshots/        # 测试截图（gitignore）
@@ -39,13 +41,15 @@ toolbox/
     ├── test_toolbox.py
     ├── test_training_cert_batch_fill.py
     ├── test_te_cert_cloud_core.js        # 证书工具核心逻辑（纯 Node）
+    ├── test_te_cert_direct_pdf.js        # 本地直接 PDF 逻辑
+    ├── test_te_cert_direct_pdf_browser.py # 真实 Chromium 生成测试
     ├── lint_te_cert_cloud.js             # 证书工具接线检查（纯 Node）
     └── test_te_cert_dom_smoke.js         # 证书工具 DOM 冒烟（最小 DOM 桩）
 ```
 
-### te-cert-generator 的十四条硬约束
+### te-cert-generator 的十五条硬约束
 
-改这个工具前先读这十四条，都是踩过的坑：
+改这个工具前先读这十五条，都是踩过的坑：
 
 1. **模板改了必须重跑载荷**：`node tools/te-cert-generator/build-templates.js`。
    `file://` 下 Chromium 拒绝 fetch 同目录的 docx，模板只能靠 base64 载荷用
@@ -54,8 +58,8 @@ toolbox/
 2. **CSP 里的 `connect-src` 是白名单**：云转换的三个服务商域名写死在这里，
    不是通配 `https:`。新增服务商要同时改 `cert-cloud.js` 的端点和 `index.html`
    的 CSP，linter 会核对两边是否一致。
-3. **不能说"不上传"**：DOCX 全程本地，但 PDF 转换会把证书内容发给用户选定的
-   云服务。页面文案必须讲清楚这一点，默认值必须是"不转换"。
+3. **隐私文案必须区分生成路径**：`local-direct` 全程本地、不上传；云转换会把证书内容
+   发给用户选定的服务商。页面必须讲清楚两者差异，不能把云路径写成“不上传”。
 4. **不提供 DOCX 下载入口**：证书一旦发出去就是最终版，源文件可以被随意改动，
    不适合交付给学员。DOCX 只作为云转换的**中间产物**存在 ——
    `CertCore.buildDocx` 与 `buildCertificateItems` 必须保留（PDF 转换依赖它们），
@@ -172,6 +176,12 @@ toolbox/
     相邻的一条：`record.aiSources` 用的是 core 的字段名（`name/hospital/date`），
     而表格那一列叫 `dateRaw` —— `editableCell` 里必须做 `dateRaw → date` 的映射，
     否则日期格的来源角标永远不显示（真实踩过）。
+
+15. **本地直接 PDF 是固定背景 + 栅格文字，不是 DOCX 渲染器**。
+    `cert-direct-pdf.js` 必须复用 `CertCore.extractImage()` 与 `printSlots()`，原始 JPEG 不重压缩，
+    动态文字由浏览器 Canvas 使用微软雅黑绘制为透明 PNG 后叠加；因此文字不可搜索/选中。
+    不要重新引入整套中文字体嵌入（旧方案约 23.9MB 且 pdf-lib 子集化曾产出空文字）。
+    改坐标、字号或字距后，必须运行 `test_te_cert_direct_pdf_browser.py`，并与 Word 参照图做视觉核对。
 
 
 ### te-cert-generator 参考资料：字体与姓名框几何

@@ -316,6 +316,7 @@ function loadApp() {
       return expanded + "." + String(extension || "pdf").replace(/^\.+/, "");
     },
   };
+  sandbox.CertDirectPdf = require(path.join(TOOL, "cert-direct-pdf.js"));
   sandbox.CertCloud = require(path.join(TOOL, "cert-cloud.js"));
   // AI 模块也要加载：app.js 的 restoreAiSettings 依赖 window.CertAi，
   // 桩里不给它就会静默跳过整个 AI 面板的渲染 —— 那是桩的保真度问题，
@@ -367,7 +368,7 @@ check(
     " 实现=" + JSON.stringify(realCore.DEFAULT_NAMING_PATTERNS),
 );
 
-console.log("\n[2] 云转换设置面板");
+console.log("\n[2] PDF 生成方式面板");
 const providerSelect = app.registry.get("cloudProvider");
 check("找到了 cloudProvider 下拉框", Boolean(providerSelect));
 check("下拉框被填上了选项", providerSelect && providerSelect.children.length >= 2,
@@ -375,21 +376,31 @@ check("下拉框被填上了选项", providerSelect && providerSelect.children.l
 
 if (providerSelect && providerSelect.children.length) {
   const first = providerSelect.children[0];
-  check("第一个选项是「不转换」", first.value === "" && /不转换/.test(first.textContent), first.textContent);
-  check("默认选中「不转换」", providerSelect.value === "", "实际 value=" + JSON.stringify(providerSelect.value));
+  check("第一个选项要求选择生成方式", first.value === "" && /请选择/.test(first.textContent), first.textContent);
+  check("默认未选择生成方式", providerSelect.value === "", "实际 value=" + JSON.stringify(providerSelect.value));
 
   const ids = providerSelect.children.slice(1).map((option) => option.value);
-  check("列出全部服务商", ids.length === app.sandbox.CertCloud.PROVIDERS.length, ids.join(", "));
-  check("服务商 id 与模块一致",
-    ids.every((id) => app.sandbox.CertCloud.getProvider(id)),
-    ids.join(", "));
+  check("列出本地直接生成", ids.includes(app.sandbox.CertDirectPdf.PROVIDER_ID), ids.join(", "));
+  const cloudIds = ids.filter((id) => id !== app.sandbox.CertDirectPdf.PROVIDER_ID);
+  check("仍列出全部云服务商", cloudIds.length === app.sandbox.CertCloud.PROVIDERS.length, ids.join(", "));
+  check("云服务商 id 与模块一致",
+    cloudIds.every((id) => app.sandbox.CertCloud.getProvider(id)),
+    cloudIds.join(", "));
 }
 
 const pdfBtn = app.registry.get("pdfBtn");
-check("pdfBtn 默认禁用（没选服务商）", pdfBtn && pdfBtn.disabled === true);
+check("pdfBtn 默认禁用（没选生成方式）", pdfBtn && pdfBtn.disabled === true);
 
-console.log("\n[3] 选中服务商后生成密钥输入框");
+console.log("\n[3] 本地方式不需要密钥，云服务仍生成密钥输入框");
 if (providerSelect) {
+  providerSelect.value = "local-direct";
+  providerSelect.dispatch("change");
+  check(
+    "本地直接生成不创建密钥输入框",
+    app.registry.get("cloudFields").querySelectorAll("[data-cloud-field]").length === 0,
+  );
+  check("本地方式明确提示不联网", /完全本地处理/.test(app.registry.get("cloudNote").textContent));
+
   providerSelect.value = "convertapi";
   providerSelect.dispatch("change");
 
@@ -415,11 +426,11 @@ if (providerSelect) {
     );
   }
 
-  // 回到不转换，确认能收回
+  // 回到未选择，确认能收回
   providerSelect.value = "";
   providerSelect.dispatch("change");
   check(
-    "退回「不转换」后密钥框被清空",
+    "退回未选择状态后密钥框被清空",
     app.registry.get("cloudFields").querySelectorAll("[data-cloud-field]").length === 0,
   );
 }

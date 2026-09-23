@@ -36,6 +36,8 @@
     <link rel="stylesheet" href="./styles.css" />
     <script defer src="./xlsx.full.min.js"></script>
     <script defer src="./cert-core.js"></script>
+    <script defer src="./vendor/pdf-lib.min.js"></script>
+    <script defer src="./cert-direct-pdf.js"></script>
     <script defer src="./cert-cloud.js"></script>
     <script defer src="./cert-ai.js"></script>
     <!--
@@ -56,9 +58,9 @@
         <p class="eyebrow">CERTIFICATE FORGE · LOCAL</p>
         <h1>TE 培训证书批量生成</h1>
       </div>
-      <div class="privacy-badge" title="DOCX 在本机生成；PDF 转换需你显式选择云服务">
+      <div class="privacy-badge" title="可选择完全离线的本地直接 PDF；云服务仍需你显式选择">
         <span class="privacy-badge__dot" aria-hidden="true"></span>
-        本地生成 · PDF 需自选云服务
+        本地生成 · PDF 可完全离线
       </div>
     </header>
 
@@ -199,13 +201,13 @@
           </p>
 
           <div class="cloud-block">
-            <h3 class="cloud-title">PDF 转换服务</h3>
+            <h3 class="cloud-title">PDF 生成方式</h3>
             <p class="panel-note">
-              PDF 需要真正的排版引擎，浏览器做不好这件事，所以交给云服务。
-              选好服务商并填密钥后，点下面的按钮开始转换。
+              可选“本地直接生成（实验）”，证书内容不会离开这台电脑；
+              也可以继续使用现有云转换服务。
             </p>
 
-            <label class="field-label" for="cloudProvider">转换服务</label>
+            <label class="field-label" for="cloudProvider">生成方式</label>
             <select id="cloudProvider" class="cloud-select"></select>
 
             <div id="cloudFields" class="cloud-fields"></div>
@@ -279,7 +281,7 @@
             </div>
 
             <button id="pdfBtn" class="button button--secondary" type="button" disabled>
-              <span id="pdfBtnLabel">转换并下载 PDF（每人一个）</span>
+              <span id="pdfBtnLabel">生成并下载 PDF（每人一个）</span>
               <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 19h14" /></svg>
             </button>
 
@@ -335,7 +337,7 @@
 
         <div id="noticeBar" class="notice-bar" role="status" aria-live="polite">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 8v5m0 3h.01M10.3 3.9 2.6 17.2A2 2 0 0 0 4.3 20h15.4a2 2 0 0 0 1.7-2.8L13.7 3.9a2 2 0 0 0-3.4 0Z" /></svg>
-          <span>在左侧输入姓名、医院和日期，点「解析到表格」后即可逐条修改。DOCX 全程在本机生成；只有你选了 PDF 转换服务后，证书内容才会发送给该服务。</span>
+          <span>在左侧输入姓名、医院和日期，点「解析到表格」后即可逐条修改。选择“本地直接生成（实验）”时不联网；只有选用云服务时证书内容才会外发。</span>
         </div>
 
         <div id="emptyState" class="empty-state">

@@ -3,9 +3,11 @@
 /**
  * TE 培训证书批量生成 —— 页面逻辑。
  *
- * 两条产出路径：
- *   1) 本地生成 DOCX / ZIP —— 直接填充 word/document.xml，零网络、零后端。
- *   2) 云端转 PDF —— 把拼好的多页 DOCX 交给用户自己选的云转换服务，
+ * 三条产出路径：
+ *   1) 本地生成 DOCX —— 只作为 PDF 生成的中间产物，不提供下载入口。
+ *   2) 本地直接 PDF（实验）—— 原始证书 JPEG + 浏览器 Canvas 文字层，
+ *      再由本地 pdf-lib 合成 PDF；零网络、零后端。
+ *   3) 云端转 PDF —— 把拼好的多页 DOCX 交给用户自己选的云转换服务，
  *      浏览器直连（各服务商都放行了 CORS，已实测），API Key 只存在本机
  *      localStorage，不经过任何中间服务器。
  *      **只有在用户显式选好服务商并填好密钥后才会联网**，默认不联网。
@@ -19,6 +21,7 @@
 const MAX_FILE_BYTES = 20 * 1024 * 1024;
 const MAX_PREVIEW_ROWS = 500;
 const TEMPLATE_TIMEOUT_MS = 15000;
+const DIRECT_PDF_PROVIDER_ID = "local-direct";
 
 /** 云转换凭据在本机浏览器里的存放键。只存本机，永不外发到别处。 */
 const CLOUD_STORE_KEY = "te-cert-cloud-credentials-v1";
@@ -60,7 +63,7 @@ const state = {
   source: "",
   fileMeta: "",
   parseNotes: [],
-  /** 云转换服务商 id，空串表示未启用（默认不联网） */
+  /** PDF 生成方式 id，空串表示未启用；local-direct 表示完全本地 */
   cloudProvider: "",
   /** 当前服务商的凭据，形如 { secret: "..." } 或 { clientId, clientSecret } */
   cloudCredentials: {},
@@ -200,8 +203,8 @@ function bindEvents() {
       els.pdfMergeToggle.addEventListener("change", () => {
         if (els.pdfBtnLabel) {
           els.pdfBtnLabel.textContent = els.pdfMergeToggle.checked
-            ? "转换并下载 PDF（合并成一本）"
-            : "转换并下载 PDF（每人一个）";
+            ? "生成并下载 PDF（合并成一本）"
+            : "生成并下载 PDF（每人一个）";
         }
       });
     }
@@ -709,9 +712,11 @@ function refreshStats() {
 
 function refreshButtons() {
   const ready = countReady();
-  // PDF 走云转换，所以还要求先选好服务商；没选就不让点，避免点了才发现没配
-  const cloudReady = Boolean(state.cloudProvider && window.CertCloud);
-  els.pdfBtn.disabled = state.generating || ready === 0 || !cloudReady;
+  // PDF 可以本地生成，也可以走云转换；所选模块没加载时不让点。
+  const pdfReady = state.cloudProvider === DIRECT_PDF_PROVIDER_ID
+    ? Boolean(window.CertDirectPdf)
+    : Boolean(state.cloudProvider && window.CertCloud);
+  els.pdfBtn.disabled = state.generating || ready === 0 || !pdfReady;
   els.clearAllBtn.disabled = state.generating || state.records.length === 0;
   els.addRowBtn.disabled = state.generating;
   els.selectAll.disabled = ready === 0;
@@ -1181,7 +1186,7 @@ function loadStoredCloud() {
 function persistCloud() {
   try {
     const all = loadStoredCloud();
-    if (state.cloudProvider) {
+    if (state.cloudProvider && state.cloudProvider !== DIRECT_PDF_PROVIDER_ID) {
       all[state.cloudProvider] = state.cloudCredentials;
       localStorage.setItem(CLOUD_STORE_KEY, JSON.stringify(all));
     }
@@ -1190,15 +1195,36 @@ function persistCloud() {
   }
 }
 
+function isDirectPdfSelected() {
+  return state.cloudProvider === DIRECT_PDF_PROVIDER_ID;
+}
+
+function selectedPdfProvider() {
+  if (isDirectPdfSelected()) {
+    return {
+      id: DIRECT_PDF_PROVIDER_ID,
+      label: "本地直接生成（实验）",
+      freeNote: "完全离线，无次数限制",
+    };
+  }
+  return window.CertCloud ? window.CertCloud.getProvider(state.cloudProvider) : null;
+}
+
 function restoreCloudSettings() {
-  if (!window.CertCloud || !els.cloudProvider) return;
+  if (!els.cloudProvider) return;
 
   els.cloudProvider.innerHTML = "";
   const none = document.createElement("option");
   none.value = "";
-  none.textContent = "不转换（仅生成本地文件）";
+  none.textContent = "请选择 PDF 生成方式";
   els.cloudProvider.appendChild(none);
-  window.CertCloud.PROVIDERS.forEach((provider) => {
+  if (window.CertDirectPdf) {
+    const local = document.createElement("option");
+    local.value = DIRECT_PDF_PROVIDER_ID;
+    local.textContent = "本地直接生成（实验 · 完全离线）";
+    els.cloudProvider.appendChild(local);
+  }
+  (window.CertCloud ? window.CertCloud.PROVIDERS : []).forEach((provider) => {
     const option = document.createElement("option");
     option.value = provider.id;
     option.textContent = provider.label + "（" + provider.freeNote + "）";
@@ -1215,8 +1241,22 @@ function restoreCloudSettings() {
 
 /** 按当前选中的服务商重建密钥输入框。 */
 function renderCloudFields(stored) {
-  if (!els.cloudFields || !window.CertCloud) return;
+  if (!els.cloudFields) return;
   els.cloudFields.textContent = "";
+
+  if (isDirectPdfSelected()) {
+    els.cloudHelp.textContent =
+      "实验方案：原证书底图保持不变，姓名、医院和日期由浏览器在本机绘制，" +
+      "再直接合成 PDF。无需密钥，也不会发出网络请求。";
+    if (els.cloudNote) {
+      els.cloudNote.textContent =
+        "✓ 完全本地处理。当前实验版为图像型 PDF，动态文字不能搜索或复制；" +
+        "请先核对生成效果再正式发放。";
+    }
+    if (els.cloudSaveBtn) els.cloudSaveBtn.disabled = true;
+    if (els.cloudForgetBtn) els.cloudForgetBtn.disabled = true;
+    return;
+  }
 
   const fileHint = IS_FILE_PROTOCOL
     ? "\n\n⚠ 当前页面是用 file:// 打开的（双击 HTML）。跨域请求在这种页面上" +
@@ -1227,7 +1267,7 @@ function renderCloudFields(stored) {
       "或部署到 GitHub Pages。DOCX 生成不受影响，file:// 下照常可用。"
     : "";
 
-  const provider = window.CertCloud.getProvider(state.cloudProvider);
+  const provider = window.CertCloud ? window.CertCloud.getProvider(state.cloudProvider) : null;
   if (!provider) {
     els.cloudHelp.textContent = "";
     if (els.cloudNote) {
@@ -1276,7 +1316,8 @@ function renderCloudFields(stored) {
 
 /** 从输入框收集凭据。缺项直接报错，不要带着半份密钥去发请求。 */
 function collectCloudCredentials() {
-  const provider = window.CertCloud.getProvider(state.cloudProvider);
+  if (isDirectPdfSelected()) return {};
+  const provider = window.CertCloud ? window.CertCloud.getProvider(state.cloudProvider) : null;
   if (!provider) return null;
   const credentials = {};
   const inputs = els.cloudFields.querySelectorAll("[data-cloud-field]");
@@ -1695,7 +1736,7 @@ async function buildCertificateItems(targets, templateBytes, needDocumentXml, on
 }
 
 /**
- * 云端转 PDF。
+ * 生成 PDF：可走完全本地的实验路径，也可走原有云转换。
  *
  * 走「合批」：N 份证书拼成一份 N 页 DOCX，一次请求换回一份 N 页 PDF。
  * 这样既不必在前端合并 PDF（云端产物是对象流 PDF，前端合并代价高），
@@ -1706,15 +1747,21 @@ async function buildCertificateItems(targets, templateBytes, needDocumentXml, on
 async function generatePdf() {
   if (state.generating || !state.records.length) return;
 
-  if (!window.CertCloud) {
-    setNotice("云转换模块未加载，请刷新页面；本地 DOCX 生成不受影响。", "error");
-    showToast("云转换模块未加载。", "error");
+  if (!state.cloudProvider) {
+    setNotice("请先在左侧选择一种 PDF 生成方式。", "warn");
+    showToast("请先选择 PDF 生成方式。", "error");
+    els.cloudProvider.focus();
     return;
   }
-  if (!state.cloudProvider) {
-    setNotice("请先在左侧「PDF 转换服务」里选择一个服务商。默认不联网转换。", "warn");
-    showToast("请先选择 PDF 转换服务。", "error");
-    els.cloudProvider.focus();
+  const directPdf = isDirectPdfSelected();
+  if (directPdf && !window.CertDirectPdf) {
+    setNotice("本地 PDF 模块未加载，请刷新页面。", "error");
+    showToast("本地 PDF 模块未加载。", "error");
+    return;
+  }
+  if (!directPdf && !window.CertCloud) {
+    setNotice("云转换模块未加载，请刷新页面。", "error");
+    showToast("云转换模块未加载。", "error");
     return;
   }
 
@@ -1726,12 +1773,13 @@ async function generatePdf() {
     showToast("没有可生成 PDF 的记录。", "error");
     return;
   }
-  if (list.length > window.CertCloud.MAX_BATCH) {
+  const batchLimit = directPdf ? window.CertDirectPdf.MAX_BATCH : window.CertCloud.MAX_BATCH;
+  if (list.length > batchLimit) {
     setNotice(
-      `一次最多转换 ${window.CertCloud.MAX_BATCH} 份，当前 ${list.length} 份。请勾选后分批转换。`,
+      `一次最多生成 ${batchLimit} 份，当前 ${list.length} 份。请勾选后分批生成。`,
       "error",
     );
-    showToast(`超过 ${window.CertCloud.MAX_BATCH} 份，请分批。`, "error");
+    showToast(`超过 ${batchLimit} 份，请分批。`, "error");
     return;
   }
 
@@ -1746,7 +1794,7 @@ async function generatePdf() {
   state.cloudCredentials = credentials;
   persistCloud();
 
-  const provider = window.CertCloud.getProvider(state.cloudProvider);
+  const provider = selectedPdfProvider();
   const meta = window.CertCore.TEMPLATES[state.template];
   // 默认逐份：证书是发给个人的，每人拿到自己那张 TE操作培训证书_姓名.pdf。
   // 合成一本再发下去，收件人还得自己找自己那页 —— 实际使用中不接受。
@@ -1756,48 +1804,81 @@ async function generatePdf() {
   render();
   setProgress(0, list.length, "正在生成证书…");
   logActivity(
-    `开始云端转 PDF（${provider.label}，${list.length} 份，${meta.label}，` +
+    `开始生成 PDF（${provider.label}，${list.length} 份，${meta.label}，` +
       (wantMerged ? "合并为一份多页 PDF）" : "每人一个独立 PDF）"),
   );
 
   try {
     const templateBytes = await loadTemplate(state.template);
-    const built = await buildCertificateItems(
-      list,
-      templateBytes,
-      wantMerged, // 只有合批才需要 document.xml
-      (done, total) => {
-        if (done % 3 === 0 || done === total) {
-          setProgress(done, total, `正在生成证书 ${done} / ${total}`);
-        }
-      },
-    );
-    built.failed.forEach((item) =>
-      logActivity(`跳过 ${item.record.name || "（无姓名）"}：${item.message}`),
-    );
-    if (!built.items.length) throw new Error("所有记录都生成失败了，请检查模板文件是否完整。");
+    let built = { items: [], failed: [] };
+    let result;
 
-    const result = await window.CertCloud.convertBatch({
-      items: built.items,
-      providerId: state.cloudProvider,
-      credentials: credentials,
-      batch: wantMerged,
-      readZip: window.CertCore.readZip,
-      writeZip: window.CertCore.writeZip,
-      signal: state.cloudAbort.signal,
-      onProgress: (info) => {
-        const total = info.total || 1;
-        const done = info.done || 0;
-        setProgress(done, total, `${provider.label} · ${info.stage || "处理中"}`);
-      },
-    });
+    if (directPdf) {
+      const background = await window.CertCore.extractImage(templateBytes);
+      if (!background) throw new Error("证书模板里没有找到背景图。");
+      const directItems = list.map((record) => ({
+        name: record.name,
+        fileName: record.outputName || (record.fileBase || "TE操作培训证书_" + record.name) + ".pdf",
+        record: {
+          name: record.name,
+          hospital: record.hospital,
+          year: record.date.year,
+          month: record.date.month,
+          day: record.date.day,
+        },
+      }));
+      result = await window.CertDirectPdf.generateBatch({
+        items: directItems,
+        templateId: state.template,
+        background: background,
+        core: window.CertCore,
+        batch: wantMerged,
+        signal: state.cloudAbort.signal,
+        onProgress: (info) => {
+          const total = info.total || 1;
+          const done = info.done || 0;
+          setProgress(done, total, `${provider.label} · ${info.stage || "处理中"}`);
+        },
+      });
+    } else {
+      built = await buildCertificateItems(
+        list,
+        templateBytes,
+        wantMerged, // 只有云端合批才需要 document.xml
+        (done, total) => {
+          if (done % 3 === 0 || done === total) {
+            setProgress(done, total, `正在生成证书 ${done} / ${total}`);
+          }
+        },
+      );
+      built.failed.forEach((item) =>
+        logActivity(`跳过 ${item.record.name || "（无姓名）"}：${item.message}`),
+      );
+      if (!built.items.length) throw new Error("所有记录都生成失败了，请检查模板文件是否完整。");
 
-    result.failed.forEach((item) => logActivity(`转换失败 ${item.name}：${item.error}`));
+      result = await window.CertCloud.convertBatch({
+        items: built.items,
+        providerId: state.cloudProvider,
+        credentials: credentials,
+        batch: wantMerged,
+        readZip: window.CertCore.readZip,
+        writeZip: window.CertCore.writeZip,
+        signal: state.cloudAbort.signal,
+        onProgress: (info) => {
+          const total = info.total || 1;
+          const done = info.done || 0;
+          setProgress(done, total, `${provider.label} · ${info.stage || "处理中"}`);
+        },
+      });
+    }
+
+    result.failed.forEach((item) => logActivity(`生成失败 ${item.name}：${item.error}`));
+    (result.warnings || []).forEach((warning) => logActivity(`提示：${warning}`));
     if (!result.pdfList.length) {
       throw new Error(
         result.failed.length
-          ? "转换全部失败：" + result.failed[0].error
-          : "转换没有返回任何 PDF。",
+          ? "生成全部失败：" + result.failed[0].error
+          : "没有生成任何 PDF。",
       );
     }
 
@@ -1861,6 +1942,7 @@ async function generatePdf() {
         (shouldZip
           ? `，打包为 ZIP（${formatBytes(zipBytes)}）下载，解压后每人一个带姓名的 PDF。`
           : "，已下载。") +
+        (directPdf ? " 当前为本地实验版图像型 PDF，请核对版式后再正式发放。" : "") +
         (result.failed.length ? ` ${result.failed.length} 条失败已记录在下方。` : ""),
       result.failed.length ? "warn" : "success",
     );
@@ -1870,10 +1952,10 @@ async function generatePdf() {
     );
   } catch (error) {
     resetProgress();
-    const message = error && error.name === "AbortError" ? "已取消转换。" : error.message || "转换失败。";
+    const message = error && error.name === "AbortError" ? "已取消生成。" : error.message || "生成失败。";
     setNotice(message, "error");
     showToast(message, "error");
-    logActivity("转换失败：" + message);
+    logActivity("生成失败：" + message);
   } finally {
     state.generating = false;
     state.cloudAbort = null;
