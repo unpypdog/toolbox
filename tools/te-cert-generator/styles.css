@@ -1000,9 +1000,9 @@ footer {
   }
 }
 
-/* ------------------------------------------------- 云转换设置（PDF 可选路径） */
+/* --------------------------------------------- 远程服务表单（AI 解析共用样式） */
 
-.cloud-block {
+.generate-block {
   padding-top: 16px;
   margin-top: 16px;
   border-top: 1px dashed var(--line);
@@ -1011,7 +1011,7 @@ footer {
   min-width: 0;
 }
 
-.cloud-title {
+.generate-title {
   margin: 0;
   font-size: 0.82rem;
   letter-spacing: 0.08em;
@@ -1019,7 +1019,7 @@ footer {
   color: var(--ink-soft);
 }
 
-.cloud-select {
+.service-select {
   width: 100%;
   min-width: 0;
   padding: 9px 10px;
@@ -1029,19 +1029,19 @@ footer {
   border: 1px solid var(--line-dark);
 }
 
-.cloud-select:focus {
+.service-select:focus {
   border-color: var(--violet-deep);
   outline: 3px solid rgba(109, 63, 240, 0.22);
   outline-offset: 0;
 }
 
-.cloud-fields {
+.service-fields {
   display: grid;
   gap: 8px;
   min-width: 0;
 }
 
-.cloud-field {
+.service-field {
   display: grid;
   gap: 4px;
   min-width: 0;
@@ -1049,7 +1049,7 @@ footer {
   color: var(--ink-soft);
 }
 
-.cloud-field input {
+.service-field input {
   width: 100%;
   min-width: 0;
   padding: 8px 10px;
@@ -1060,13 +1060,13 @@ footer {
   border: 1px solid var(--line-dark);
 }
 
-.cloud-field input:focus {
+.service-field input:focus {
   border-color: var(--violet-deep);
   outline: 3px solid rgba(109, 63, 240, 0.22);
   outline-offset: 0;
 }
 
-.cloud-help {
+.service-help {
   margin: 0;
   font-size: 0.74rem;
   line-height: 1.6;
@@ -1074,11 +1074,11 @@ footer {
   overflow-wrap: anywhere;
 }
 
-.cloud-help:empty {
+.service-help:empty {
   display: none;
 }
 
-.cloud-note {
+.service-note {
   margin: 0;
   padding: 8px 10px;
   font-size: 0.76rem;
@@ -1087,11 +1087,6 @@ footer {
   background: rgba(251, 191, 36, 0.14);
   border-left: 3px solid var(--amber);
   overflow-wrap: anywhere;
-}
-
-/* 云设置里的按钮行只有两个小按钮，不需要 action-row 的 1fr auto 布局 */
-.cloud-block .action-row {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 /* 文件命名：默认收起，保留主流程的简洁；展开后集中处理三个交付层级 */
@@ -1293,11 +1288,6 @@ td[data-source^="text"]::after {
   font-size: 0.72rem;
   line-height: 1.55;
   overflow-wrap: anywhere;
-}
-
-.merge-toggle__cost {
-  color: var(--ink-soft);
-  opacity: 0.85;
 }
 
 .merge-toggle code {

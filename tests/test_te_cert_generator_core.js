@@ -1,12 +1,14 @@
 /**
  * TE 证书工具 —— 核心逻辑测试（纯 Node，无网络、无浏览器）。
  *
- * 覆盖三块：
- *   1) cert-core 的填充与排版规则（含 4 字姓名加宽这个真实 bug 的回归护栏）
- *   2) cert-cloud 的合批（多页 DOCX 拼装）与服务商契约
- *   3) cert-merge 的 PDF 合并器输入校验
+ * 覆盖：
+ *   1) 姓名框宽度规则（含 4 字姓名被裁掉这个真实 bug 的回归护栏）
+ *   2) 日期解析与 PDF 文件命名
+ *   3) AI 抽取的请求形状、校验复用与截断处理
+ *   4) 多个 PDF 打包成一个 ZIP
+ *   5) 模板读取，以及「云端 DOCX→PDF 与其 DOCX 生成管线已彻底移除」的反向断言
  *
- * 用法: node tests/test_te_cert_cloud_core.js
+ * 用法: node tests/test_te_cert_generator_core.js
  */
 "use strict";
 
@@ -15,8 +17,7 @@ const path = require("path");
 
 const TOOL = path.join(__dirname, "..", "tools", "te-cert-generator");
 const core = require(path.join(TOOL, "cert-core.js"));
-const cloud = require(path.join(TOOL, "cert-cloud.js"));
-const merge = require(path.join(TOOL, "cert-merge.js"));
+const direct = require(path.join(TOOL, "cert-direct-pdf.js"));
 // 放在模块级而不是 testAiExtraction 内部：testTruncationEndToEnd 是同级的独立函数，
 // 写在函数里它取不到，只会报一句 "ai is not defined"。
 const ai = require(path.join(TOOL, "cert-ai.js"));
@@ -40,314 +41,156 @@ function equal(name, actual, expected) {
 
 const templateBytes = new Uint8Array(fs.readFileSync(path.join(TOOL, "template-general.docx")));
 
-async function build(name, hospital, year, month, day) {
-  const docx = await core.buildDocx(templateBytes, {
-    name: name,
-    hospital: hospital,
-    year: year || "2025",
-    month: month || "10",
-    day: day || "10",
-  });
-  const entries = await core.readZip(docx);
-  const entry = entries.find((item) => item.name === "word/document.xml");
-  return { docx: docx, documentXml: entry.data, xml: Buffer.from(entry.data).toString("utf8") };
+/** 取某个模板里姓名槽位的最终几何（cert-core 给基准，cert-direct-pdf 施加加宽规则）。 */
+function nameSlotGeometry(name, templateId) {
+  const model = core.printSlots(
+    { name: name, hospital: "南京市第一医院", year: "2025", month: "10", day: "10" },
+    templateId || "general",
+  );
+  const slot = model.slots.find((each) => each.key === "name");
+  return {
+    base: slot.spec,
+    spec: direct.resolveSlot(slot, { name: name }).spec,
+    chars: Array.from(name).length,
+    page: model.page,
+  };
 }
 
-/** 从 document.xml 里抠出姓名文本框的几何。 */
-function nameBox(xml) {
-  const anchors = xml.match(/<wp:anchor[\s\S]*?<\/wp:anchor>/g) || [];
-  for (const anchor of anchors) {
-    const texts = (anchor.match(/<w:t[^>]*>([^<]*)<\/w:t>/g) || [])
-      .map((t) => t.replace(/<[^>]+>/g, ""))
-      .join("");
-    if (texts && texts.length <= 6 && !texts.includes("颁发日期") && !texts.includes("医院")) {
-      const pos = (anchor.match(/<wp:posOffset>(-?\d+)<\/wp:posOffset>/g) || []).map((p) =>
-        p.replace(/<[^>]+>/g, ""),
-      );
-      const ext = anchor.match(/<wp:extent cx="(\d+)"/);
-      return { text: texts, posH: pos[0], cx: ext ? ext[1] : null };
-    }
-  }
-  return null;
+/** 居中文字的实际落点：文本框按 spec.align 居中时，文字左右边缘在这里。 */
+function centeredTextEdges(geo) {
+  const content = geo.spec.width - direct.constants.textInset * 2;
+  const textWidth = geo.chars * geo.base.size;
+  const left = geo.spec.left + direct.constants.textInset + (content - textWidth) / 2;
+  return { left: left, right: left + textWidth, textWidth: textWidth };
 }
 
-function vmlNameBox(xml) {
-  const m = xml.match(/margin-left:([\d.]+)pt;margin-top:145\.95pt;height:66\.7pt;width:([\d.]+)pt/);
-  return m ? { marginLeft: m[1], width: m[2] } : null;
-}
 
 /* ------------------------------------------------------------------ 1. 姓名框 */
 
 async function testNameBox() {
   console.log("\n[1] 姓名框宽度规则（4 字姓名被裁掉的 bug 回归）");
 
-  const K = core.constants;
+  const INSET = direct.constants.textInset;
   const cases = [
-    { name: "张三", chars: 2, widen: false },
-    { name: "倪文婧", chars: 3, widen: false },
-    { name: "欧阳娜娜", chars: 4, widen: true },
-    { name: "司马相如", chars: 4, widen: true },
-    { name: "欧阳娜娜娜", chars: 5, widen: true },
+    { name: "张三", chars: 2 },
+    { name: "倪文婧", chars: 3 },
+    { name: "欧阳娜娜", chars: 4 },
+    { name: "司马相如", chars: 4 },
+    { name: "欧阳娜娜娜", chars: 5 },
   ];
 
+  // 基准几何来自 cert-core.printSlots，加宽由 cert-direct-pdf.resolveSlot 施加 ——
+  // 这正是真实生成路径调用的两个函数，所以这条护栏钉的是成品 PDF 的落点。
   const geo = {};
   for (const item of cases) {
-    const built = await build(item.name, "南京市第一医院");
-    const box = nameBox(built.xml);
-    const vml = vmlNameBox(built.xml);
-    geo[item.name] = { box, vml, chars: item.chars };
-    check(item.name + "（" + item.chars + " 字）定位到姓名框", Boolean(box && vml));
+    for (const templateId of ["general", "special"]) {
+      const key = templateId + "/" + item.name;
+      geo[key] = nameSlotGeometry(item.name, templateId);
+      check(key + "（" + item.chars + " 字）定位到姓名槽位", Boolean(geo[key].spec));
+    }
   }
 
-  // 2 字：完全保持原状（不能回归）
-  equal("2 字 posOffsetH 不变", geo["张三"].box.posH, K.NAME_BOX_POS_ORIG);
-  equal("2 字 margin-left 不变", geo["张三"].vml.marginLeft, "247.7");
-  equal("2 字 框宽不变", geo["张三"].vml.width, "124.5");
+  const THREE = nameSlotGeometry("倪文婧");
+  const BASE_WIDTH = THREE.base.width;
+  const CHAR_PT = THREE.base.size; // 36pt 字号 = 一个全角字宽
 
-  // 3 字：只左移、不加宽（既有行为）
-  equal("3 字 posOffsetH = 2917190", geo["倪文婧"].box.posH, K.NAME_BOX_POS_NEW);
-  equal("3 字 margin-left = 229.7", geo["倪文婧"].vml.marginLeft, "229.7");
-  equal("3 字 框宽仍为 124.5", geo["倪文婧"].vml.width, "124.5");
+  // 2 字：模板原始位置（3 字基准左移过的量要还回去），框宽不变
+  const two = nameSlotGeometry("张三").spec;
+  equal("2 字 框宽不变", two.width, BASE_WIDTH);
+  equal("2 字 位置 = 3 字基准 + 18pt", two.left, THREE.base.left + 18);
+
+  // 3 字：校准基准，只左移不加宽
+  equal("3 字 用校准基准", THREE.spec.left, THREE.base.left);
+  equal("3 字 框宽仍为 " + BASE_WIDTH, THREE.spec.width, BASE_WIDTH);
 
   // 4 字：加宽到放得下，并整字宽左移
-  const four = geo["欧阳娜娜"];
-  const need = 4 * K.NAME_BOX_PT_PER_CHAR + 7.2;
+  const four = nameSlotGeometry("欧阳娜娜").spec;
+  const need = 4 * CHAR_PT + INSET * 2;
   check(
-    "4 字 框宽 " + four.vml.width + "pt ≥ 放得下所需的 " + need + "pt",
-    Number(four.vml.width) >= need,
+    "4 字 框宽 " + four.width + "pt ≥ 放得下所需的 " + need + "pt",
+    four.width >= need,
+    "框宽不够会重演「欧阳娜娜」被裁成「欧阳娜」",
   );
-  equal("4 字 margin-left = 193.7（左移整整一个字宽 36pt）", four.vml.marginLeft, "193.7");
-  equal(
-    "4 字 cx = 1581150 + 457200",
-    four.box.cx,
-    String(Number(K.NAME_BOX_CX_ORIG) + K.NAME_BOX_CX_PER_CHAR),
-  );
-  equal("4 字 DrawingML cx 与 VML width 一致", Math.round(Number(four.box.cx) / 12700 * 10) / 10, Number(four.vml.width));
-  equal("同名不同 4 字姓名几何一致", geo["司马相如"].vml.marginLeft, four.vml.marginLeft);
+  equal("4 字 左移整整一个字宽 36pt", four.left, THREE.base.left - CHAR_PT);
+  equal("4 字 框宽 = 基准 + 36pt", four.width, BASE_WIDTH + CHAR_PT);
+  equal("同名不同 4 字姓名几何一致", nameSlotGeometry("司马相如").spec.left, four.left);
 
   // 5 字：规则可外推
-  const five = geo["欧阳娜娜娜"];
-  equal("5 字 margin-left = 157.7", five.vml.marginLeft, "157.7");
-  check("5 字 框宽 " + five.vml.width + "pt ≥ " + (5 * 36 + 7.2) + "pt", Number(five.vml.width) >= 5 * 36 + 7.2);
+  const five = nameSlotGeometry("欧阳娜娜娜").spec;
+  equal("5 字 左移 72pt", five.left, THREE.base.left - CHAR_PT * 2);
+  check("5 字 框宽 ≥ " + (5 * CHAR_PT + INSET * 2) + "pt", five.width >= 5 * CHAR_PT + INSET * 2);
 
-  // 核心：右边缘钉死，别挤掉与医院名之间的间隙
+  // 核心：右边缘钉死，别挤掉与医院名之间的间隙。
+  // 文本框右边缘与「居中文字」的右边缘都要恒定 —— 后者才是视觉上真正看的那个。
   console.log("  --- 右边缘必须恒定 ---");
-  const PAGE_LEFT = 72.0;
-  const INSET = 3.6;
-  const rightEdges = cases.map((item) => {
-    const g = geo[item.name];
-    const textLeft = PAGE_LEFT + Number(g.vml.marginLeft) + INSET;
-    return { name: item.name, chars: item.chars, left: textLeft, right: textLeft + item.chars * K.NAME_BOX_PT_PER_CHAR };
+  const rows = cases.map((item) => {
+    const g = geo["general/" + item.name];
+    return {
+      name: item.name,
+      chars: item.chars,
+      boxRight: g.spec.left + g.spec.width,
+      text: centeredTextEdges(g),
+      width: g.spec.width,
+    };
   });
-  const ref3 = rightEdges.find((r) => r.chars === 3);
-  for (const row of rightEdges) {
+  const ref3 = rows.find((row) => row.chars === 3);
+  for (const row of rows) {
     if (row.chars <= 3) continue;
     check(
-      row.name + "（" + row.chars + " 字）右边缘与 3 字一致",
-      Math.abs(row.right - ref3.right) < 0.05,
-      "偏移 " + (row.right - ref3.right).toFixed(1) + "pt",
+      row.name + "（" + row.chars + " 字）框右边缘与 3 字一致",
+      Math.abs(row.boxRight - ref3.boxRight) < 0.05,
+      "偏移 " + (row.boxRight - ref3.boxRight).toFixed(1) + "pt",
     );
-  }
-  for (const row of rightEdges) {
     check(
-      row.name + " 文字左边缘 " + row.left.toFixed(1) + "pt 未越过页左边距",
-      row.left > PAGE_LEFT,
+      row.name + "（" + row.chars + " 字）文字右边缘与 3 字一致",
+      Math.abs(row.text.right - ref3.text.right) < 0.05,
+      "偏移 " + (row.text.right - ref3.text.right).toFixed(1) + "pt —— 右移会吃掉与医院名的间隙",
     );
   }
+  // 医院名槽位的左边缘：姓名文字右边缘必须留在它左边
+  const hospital = core
+    .printSlots({ name: "倪文婧", hospital: "南京市第一医院", year: "2025", month: "10", day: "10" }, "general")
+    .slots.find((each) => each.key === "hospital").spec;
+  for (const row of rows) {
+    check(
+      row.name + " 文字右边缘 " + row.text.right.toFixed(1) + "pt 仍在医院名左边缘 "
+        + hospital.left.toFixed(1) + "pt 之前",
+      row.text.right < hospital.left,
+    );
+  }
+  for (const row of rows) {
+    check(
+      row.name + " 文字左边缘 " + row.text.left.toFixed(1) + "pt 未越过页左边距",
+      row.text.left > 0,
+    );
+  }
+
+  // 两个模板的姓名槽位基准必须一致，否则两个版本的排版会各走一套规则
+  equal(
+    "两个模板的姓名槽位基准一致",
+    nameSlotGeometry("倪文婧", "special").base.left,
+    THREE.base.left,
+  );
+  equal(
+    "两个模板的姓名框宽一致",
+    nameSlotGeometry("倪文婧", "special").base.width,
+    BASE_WIDTH,
+  );
 
   console.log("  --- 各长度对照 ---");
   console.log("    姓名".padEnd(14) + "字数  文字左   文字右   框宽");
-  for (const row of rightEdges) {
+  for (const row of rows) {
     console.log(
       "    " + row.name.padEnd(12) + String(row.chars).padEnd(6) +
-      row.left.toFixed(1).padEnd(9) + row.right.toFixed(1).padEnd(9) + geo[row.name].vml.width,
+      row.text.left.toFixed(1).padEnd(9) + row.text.right.toFixed(1).padEnd(9) + row.width,
     );
   }
 }
 
-/* -------------------------------------------------------------- 2. 合批 DOCX */
-
-async function testBatch() {
-  console.log("\n[2] 合批：N 份单页证书拼成一份 N 页 DOCX");
-
-  const people = [
-    { name: "靳睿", hospital: "南京鼓楼医院" },
-    { name: "欧阳娜娜", hospital: "上海市第六人民医院" },
-    { name: "芮法娟", hospital: "南京鼓楼医院" },
-  ];
-  const items = [];
-  for (const person of people) {
-    const built = await build(person.name, person.hospital);
-    items.push({ name: person.name, docx: built.docx, documentXml: built.documentXml });
-  }
-
-  const combinedXml = cloud.buildBatchDocx(
-    items.map((item) => ({ name: item.name, documentXml: item.documentXml })),
-  );
-  const xml = Buffer.from(combinedXml).toString("utf8");
-
-  check("合批产物是 Uint8Array", combinedXml instanceof Uint8Array);
-  check("含 <w:body>", xml.includes("<w:body>"));
-  equal("<w:sectPr> 只保留一份", (xml.match(/<w:sectPr/g) || []).length, 1);
-
-  // body 一级子元素：N 个内容段 + (N-1) 个分页段 + 1 个 sectPr
-  const body = xml.match(/<w:body>([\s\S]*)<\/w:body>/)[1];
-  let depth = 0;
-  const topLevel = [];
-  const tagRe = /<(\/?)([A-Za-z_][\w:.-]*)((?:"[^"]*"|'[^']*'|[^>"'])*?)(\/?)>/g;
-  let m;
-  while ((m = tagRe.exec(body)) !== null) {
-    const close = m[1];
-    const tag = m[2];
-    const selfClose = m[4];
-    if (tag.startsWith("?") || tag.startsWith("!")) continue;
-    if (close) {
-      depth -= 1;
-      continue;
-    }
-    if (depth === 0) topLevel.push(tag);
-    if (!selfClose) depth += 1;
-  }
-  const expected = people.length + (people.length - 1) + 1;
-  equal("body 一级子元素数 = N + (N-1) 分页段 + sectPr", topLevel.length, expected);
-  equal("最后一个是 sectPr", topLevel[topLevel.length - 1], "w:sectPr");
-  equal("段落总数 = N + (N-1)", topLevel.filter((t) => t === "w:p").length, people.length * 2 - 1);
-
-  // 分页符：必须显式插入，不能靠浮动背景图撑页
-  const pageBreaks = xml.match(/<w:br w:type="page"\/>/g) || [];
-  equal("分页符数量 = N-1", pageBreaks.length, people.length - 1);
-  check(
-    "分页符出现在内容段之间（第一份之前没有）",
-    !/^<w:body><w:p><w:r><w:br w:type="page"\/><\/w:r><\/w:p>/.test(xml),
-    "第一份证书前不应有分页符，否则会多出一张空白页",
-  );
-
-  const embeds = [...new Set(xml.match(/r:embed="[^"]+"/g) || [])];
-  equal("背景图引用去重后只剩 1 个（复用同一张图）", embeds.length, 1);
-  equal("背景图引用出现 N 次", (xml.match(/r:embed=/g) || []).length, people.length);
-
-  for (const person of people) {
-    check("合批里含 " + person.name + " 的姓名节点", xml.includes(">" + person.name + "<"));
-    check("合批里含 " + person.hospital, xml.includes(">" + person.hospital + "<"));
-  }
-
-  // 用第一份的 zip 承载
-  const batched = await cloud.repackWithDocumentXml(items[0].docx, combinedXml, core.readZip, core.writeZip);
-  check("合批 docx 是有效 ZIP", batched[0] === 0x50 && batched[1] === 0x4b);
-  const entries = await core.readZip(batched);
-  const entry = entries.find((e) => e.name === "word/document.xml");
-  check("合批 docx 里的 document.xml 就是拼好的那份", Buffer.from(entry.data).equals(Buffer.from(combinedXml)));
-  check("合批 docx 仍含背景图", entries.some((e) => e.name.startsWith("word/media/") && e.data.length > 1000));
-  check(
-    "合批体积只比单份多一点点（没有复制背景图）",
-    batched.length < items[0].docx.length * 1.2,
-    "单份 " + items[0].docx.length + " → 合批 " + batched.length,
-  );
-
-  // 错误路径必须明确报错，不能产出坏文件
-  let threw = false;
-  try {
-    cloud.buildBatchDocx([{ name: "x", documentXml: new Uint8Array(0) }]);
-  } catch {
-    threw = true;
-  }
-  check("缺 document.xml 时抛错而不是产出坏文件", threw);
-
-  threw = false;
-  try {
-    cloud.buildBatchDocx([{ name: "x", bytes: items[0].docx }]);
-  } catch {
-    threw = true;
-  }
-  check("误传整个 docx 包（而非 document.xml）时抛错", threw);
-}
-
-/* ------------------------------------------------------- 3. 服务商契约一致性 */
-
-function testProviders() {
-  console.log("\n[3] 云服务商契约");
-
-  equal("注册了 3 个服务商", cloud.PROVIDERS.length, 3);
-  const ids = cloud.PROVIDERS.map((p) => p.id);
-  check("id 唯一", new Set(ids).size === ids.length, ids.join(", "));
-  check("含 convertapi", ids.includes("convertapi"));
-  check("含 cloudconvert", ids.includes("cloudconvert"));
-  check("含 adobe", ids.includes("adobe"));
-
-  // 按份计费/次数有限的场景下，必须有批量上限
-  check("MAX_BATCH 是正整数", Number.isInteger(cloud.MAX_BATCH) && cloud.MAX_BATCH > 0, String(cloud.MAX_BATCH));
-
-  for (const provider of cloud.PROVIDERS) {
-    check(provider.id + " 有 https 端点", /^https:\/\//.test(provider.endpoint || ""));
-    check(provider.id + " 有免费额度说明", Boolean(provider.freeNote));
-    check(provider.id + " 声明了凭据字段", Boolean(provider.credential && provider.credential.key));
-    const names = provider.credential.fields
-      ? provider.credential.fields.map((f) => f.name)
-      : [provider.credential.key];
-    const source = provider.convert.toString();
-    for (const name of names) {
-      check(
-        provider.id + " 的 convert() 解构了凭据字段 " + name,
-        new RegExp("\\b" + name + "\\b").test(source),
-      );
-    }
-  }
-
-  check("getProvider 能取到 convertapi", cloud.getProvider("convertapi") !== null);
-  equal("getProvider 对未知 id 返回 null", cloud.getProvider("nope"), null);
-}
-
-/* -------------------------------------------------------------- 4. PDF 合并器 */
-
-function testMerge() {
-  console.log("\n[4] PDF 合并器的输入校验");
-
-  // 用桌面上的真实 Word PDF（若不存在则跳过），确认对象流能被识别并明确拒绝
-  const candidates = [
-    path.join(process.env.USERPROFILE || "", "Desktop", "证书PDF基准测试", "TE操作培训证书_靳睿.pdf"),
-    path.join(process.env.USERPROFILE || "", "Desktop", "证书PDF基准测试", "TE操作培训证书_张三.pdf"),
-  ];
-  const real = candidates.find((p) => fs.existsSync(p));
-  if (real) {
-    const bytes = new Uint8Array(fs.readFileSync(real));
-    check("真实 Word PDF 能被识别为 PDF", /^%PDF-/.test(Buffer.from(bytes.subarray(0, 8)).toString("latin1")));
-    let message = "";
-    try {
-      merge.inspect(bytes);
-    } catch (error) {
-      message = error.message;
-    }
-    check(
-      "对象流 PDF 被明确拒绝而不是产出坏文件",
-      /对象流|ObjStm/.test(message),
-      "实际信息: " + (message || "（没抛错）"),
-    );
-    equal("countPages 对不可处理的 PDF 返回 -1", merge.countPages(bytes), -1);
-  } else {
-    console.log("  skip 桌面上没有真实 PDF 样本，跳过对象流检查");
-  }
-
-  let threw = false;
-  try {
-    merge.mergePdfs([new Uint8Array([1, 2, 3])]);
-  } catch {
-    threw = true;
-  }
-  check("非 PDF 输入抛错", threw);
-
-  threw = false;
-  try {
-    merge.mergePdfs([]);
-  } catch {
-    threw = true;
-  }
-  check("空输入抛错", threw);
-}
-
-/* --------------------------------------------------------------- 5. 日期解析 */
+/* --------------------------------------------------------------- 2. 日期解析 */
 
 function testDate() {
-  console.log("\n[5] 日期解析（填充正确性的前提）");
+  console.log("\n[2] 日期解析（生成正确性的前提）");
 
   equal("25年10月10日", core.parseDate("25年10月10日").year + "-" + core.parseDate("25年10月10日").month + "-" + core.parseDate("25年10月10日").day, "2025-10-10");
   equal("2025-10-10", core.parseDate("2025-10-10").month, "10");
@@ -363,10 +206,10 @@ function testDate() {
   check("空日期抛错", threw);
 }
 
-/* ----------------------------------------------------------- 5b. 文件命名 */
+/* ----------------------------------------------------------- 3. 文件命名 */
 
 function testOutputNaming() {
-  console.log("\n[5b] PDF 文件命名：预览、模板、自定义与去重");
+  console.log("\n[3] PDF 文件命名：预览、模板、自定义与去重");
 
   const records = [
     Object.assign(core.validateRecord({
@@ -417,7 +260,7 @@ function testOutputNaming() {
   );
 }
 
-/* ------------------------------------------------------- 6b. 截断的端到端路径 */
+/* ------------------------------------------------------- 4b. 截断的端到端路径 */
 
 /**
  * extractRecords 里那条截断检查，靠 stub fetch 才能走到。
@@ -541,10 +384,10 @@ async function testTruncationEndToEnd() {
   }
 }
 
-/* ------------------------------------------------------------- 6. AI 抽取 */
+/* ------------------------------------------------------------- 4. AI 抽取 */
 
 async function testAiExtraction() {
-  console.log("\n[6] AI 抽取：请求形状与校验复用");
+  console.log("\n[4] AI 抽取：请求形状与校验复用");
 
   // ---- 请求体形状：错了只会在运行时炸，而这里没有真实 key 可测 ----
   const textBody = ai.buildRequestBody({ text: "靳睿 南京鼓楼医院 2025-10-10", model: "deepseek-flash" });
@@ -1037,145 +880,10 @@ async function testAiExtraction() {
   equal("默认模型是 deepseek-flash", ds.defaultModel, "deepseek-flash");
 }
 
-/* ------------------------------------------------- 7. 逐份 / 合批两种输出方式 */
-
-async function testOutputModes() {
-  console.log("\n[7] PDF 输出方式：默认逐份（每人一个文件）");
-
-  const cloud = require(path.join(TOOL, "cert-cloud.js"));
-
-  // 造一个假服务商，把"调了几次、传了什么"记下来，避免真的联网
-  const calls = [];
-  const fakeProvider = {
-    id: "fake",
-    label: "Fake",
-    endpoint: "https://example.invalid/",
-    freeNote: "测试用",
-    credential: { key: "secret", label: "密钥" },
-    async convert({ bytes, filename }) {
-      calls.push({ bytes: bytes.length, filename: filename });
-      // 返回一个最小可识别的 PDF
-      return { bytes: new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d, 0x31, 0x2e, 0x37]) };
-    },
-  };
-  cloud.PROVIDERS.push(fakeProvider);
-
-  const items = [
-    { name: "靳睿", docx: new Uint8Array([0x50, 0x4b, 3, 4, 1]), fileName: "TE操作培训证书_靳睿.pdf" },
-    { name: "耿楠", docx: new Uint8Array([0x50, 0x4b, 3, 4, 2]), fileName: "TE操作培训证书_耿楠.pdf" },
-    { name: "张三", docx: new Uint8Array([0x50, 0x4b, 3, 4, 3]), fileName: "TE操作培训证书_张三_2.pdf" },
-  ];
-
-  // ---- 默认：逐份 ----
-  calls.length = 0;
-  const single = await cloud.convertBatch({
-    items: items,
-    providerId: "fake",
-    credentials: { secret: "x" },
-    // 刻意不传 batch，验证默认值
-  });
-  equal("默认逐份：调用次数 = 份数", calls.length, items.length);
-  equal("默认逐份：产出文件数 = 份数", single.pdfList.length, items.length);
-  equal("默认逐份：batched = false", single.batched, false);
-  check(
-    "默认逐份：每份的文件名带姓名",
-    single.pdfList.every((pdf, i) => pdf.fileName === items[i].fileName),
-    JSON.stringify(single.pdfList.map((pdf) => pdf.fileName)),
-  );
-  check(
-    "默认逐份：同名重复的 _2 后缀保住了（不会被覆盖）",
-    single.pdfList.map((pdf) => pdf.fileName).join(",").indexOf("_2.pdf") >= 0,
-    single.pdfList.map((pdf) => pdf.fileName).join(","),
-  );
-  check(
-    "默认逐份：上传的文件名也逐份区分",
-    calls.map((c) => c.filename).join(",").indexOf("耿楠") >= 0,
-    calls.map((c) => c.filename).join(","),
-  );
-  check(
-    "逐份不需要 document.xml",
-    true,
-    "（本用例的 items 就没有 documentXml，能跑通即证明）",
-  );
-
-  // ---- 显式合批 ----
-  calls.length = 0;
-  const docx = new Uint8Array(require("fs").readFileSync(path.join(TOOL, "template-general.docx")));
-  const realItems = [];
-  for (const name of ["靳睿", "耿楠"]) {
-    const built = await build(name, "南京鼓楼医院");
-    realItems.push({ name, docx: built.docx, documentXml: built.documentXml });
-  }
-  const merged = await cloud.convertBatch({
-    items: realItems,
-    providerId: "fake",
-    credentials: { secret: "x" },
-    batch: true,
-    readZip: core.readZip,
-    writeZip: core.writeZip,
-  });
-  equal("显式合批：只调用 1 次", calls.length, 1);
-  equal("显式合批：产出 1 个文件", merged.pdfList.length, 1);
-  equal("显式合批：batched = true", merged.batched, true);
-  check(
-    "合批产物是拼好的多页文档（体积远大于单份）",
-    calls[0].bytes > realItems[0].docx.length,
-    "上传了 " + calls[0].bytes + " 字节，单份 " + realItems[0].docx.length,
-  );
-  check("合批文件名不带个人姓名", merged.pdfList[0].fileName === null, String(merged.pdfList[0].fileName));
-
-  // ---- 合批缺 document.xml 时必须明确报错，不能拿 undefined 去拼 ----
-  let message = "";
-  try {
-    await cloud.convertBatch({
-      items: [{ name: "甲", docx: docx }],
-      providerId: "fake",
-      credentials: { secret: "x" },
-      batch: true,
-      readZip: core.readZip,
-      writeZip: core.writeZip,
-    });
-  } catch (error) {
-    message = error.message;
-  }
-  // items 只有 1 份时走的是逐份路径，所以这里应该成功；用 2 份来测
-  let message2 = "";
-  try {
-    await cloud.convertBatch({
-      items: [{ name: "甲", docx: docx }, { name: "乙", docx: docx }],
-      providerId: "fake",
-      credentials: { secret: "x" },
-      batch: true,
-      readZip: core.readZip,
-      writeZip: core.writeZip,
-    });
-  } catch (error) {
-    message2 = error.message;
-  }
-  check(
-    "合批缺 document.xml 时明确报错（不是拿 undefined 去拼）",
-    /document\.xml/.test(message2),
-    message2 || "（没有抛错）",
-  );
-
-  // ---- 单份 + batch:true 应退化为逐份，不去拼多页 ----
-  calls.length = 0;
-  const one = await cloud.convertBatch({
-    items: [{ name: "单人", docx: docx, documentXml: new Uint8Array(1) }],
-    providerId: "fake",
-    credentials: { secret: "x" },
-    batch: true,
-    readZip: core.readZip,
-    writeZip: core.writeZip,
-  });
-  equal("只有 1 份时不做合批（1 次调用）", calls.length, 1);
-  equal("只有 1 份时 batched = false", one.batched, false);
-}
-
-/* ------------------------------------------- 8. PDF 打包成 ZIP（一次下载） */
+/* ------------------------------------------- 5. PDF 打包成 ZIP（一次下载） */
 
 async function testPdfZip() {
-  console.log("\n[8] 多个 PDF 打包成一个 ZIP");
+  console.log("\n[5] 多个 PDF 打包成一个 ZIP");
 
   // writeZip 原本只装 docx，装 PDF 要实测：ZIP 头是否正、中文名是否保住、能否往返
   const names = ["TE操作培训证书_靳睿.pdf", "TE操作培训证书_欧阳娜娜.pdf", "TE操作培训证书_张三_2.pdf"];
@@ -1228,26 +936,81 @@ async function testPdfZip() {
   check("ZIP 的 MIME 是 application/zip", /"application\/zip"/.test(appSource));
 }
 
+/* ------------------------------------------------ 6. 云端路径已彻底移除 */
+
+/**
+ * 这个工具曾经有一条「填充 DOCX → 交给云端服务商转 PDF」的路径。本地直接 PDF 落地后
+ * 它对本场景已无作用，连同只服务于它的 DOCX 生成器一起删除了。
+ *
+ * 为什么要有**反向断言**：残留一半的接线比整块保留更危险 ——
+ *   - 页面若还挂着 cert-cloud.js 的 <script>，浏览器会 404，但不会报错，
+ *     看起来像"功能消失"；CSP 里留着已不存在的服务商域名则是无声的外发口子；
+ *   - cert-core 若还导出 buildDocx，将来很容易有人"顺手"再把它接回某条路径。
+ * 这些都不需要浏览器就能查，所以固化成断言。
+ */
+function testCloudRemoved() {
+  console.log("\n[6] 云端 DOCX→PDF 与其 DOCX 生成管线已彻底移除");
+
+  const appSource = fs.readFileSync(path.join(TOOL, "app.js"), "utf8");
+  const coreSource = fs.readFileSync(path.join(TOOL, "cert-core.js"), "utf8");
+  const html = fs.readFileSync(path.join(TOOL, "index.html"), "utf8");
+
+  for (const file of ["cert-cloud.js", "cert-merge.js"]) {
+    check(file + " 已删除", !fs.existsSync(path.join(TOOL, file)));
+  }
+  check(
+    "index.html 不再引用 cert-cloud.js / cert-merge.js",
+    !/cert-cloud\.js|cert-merge\.js/.test(html),
+    "残留的 <script src> 只会 404，页面上不报错、只是功能不见了",
+  );
+
+  // DOCX 生成能力：运行时已无调用方，导出与实现都该消失
+  for (const api of ["buildDocx", "fillDocumentXml", "escapeXml"]) {
+    check("cert-core 不再导出 " + api, typeof core[api] === "undefined", "实际类型: " + typeof core[api]);
+  }
+  check("cert-core 不再有 fillDocumentXml 实现", !/function fillDocumentXml\(/.test(coreSource));
+  check("cert-core 不再有姓名框 EMU/VML 常量", !/NAME_BOX_POS_ORIG|HOSPITAL_CX_ORIG/.test(coreSource));
+  check("app.js 不再构造 DOCX", !/buildDocx|buildCertificateItems/.test(appSource));
+
+  // CSP：connect-src 只剩 AI 那一个白名单域名
+  const csp = (html.match(/Content-Security-Policy"\s*\n?\s*content="([^"]+)"/) || [])[1] || "";
+  check("CSP 存在", Boolean(csp));
+  const connect = (csp.match(/connect-src([^;]*)/) || [])[1] || "";
+  const remote = (connect.match(/https:\/\/[a-z0-9.-]+/g) || []);
+  equal("connect-src 只剩 1 个远程域名（AI 解析用）", remote.length, 1);
+  check("那个域名是 api.deepseek.com", remote[0] === "https://api.deepseek.com", remote.join(", "));
+  for (const host of ["convertapi", "cloudconvert", "adobe", "amazonaws"]) {
+    check("CSP 不再放行 " + host, !connect.includes(host), connect);
+  }
+  check(
+    "CSP 仍放行 file:（读本地模板需要）",
+    /connect-src[^;]*file:/.test(csp),
+    csp,
+  );
+  check(
+    "CSP 仍放行 blob:（背景图需要）",
+    /img-src[^;]*blob:/.test(csp),
+    csp,
+  );
+}
+
 /* ------------------------------------------------------------------ 入口 */
 
 (async function main() {
   console.log("TE 证书工具 · 核心逻辑测试");
   console.log("工具目录: " + TOOL);
 
-  for (const file of ["index.html", "app.js", "cert-core.js", "cert-cloud.js", "cert-merge.js",
+  for (const file of ["index.html", "app.js", "cert-core.js", "cert-direct-pdf.js", "cert-ai.js",
     "styles.css", "template-general.docx", "template-special.docx"]) {
     check("存在 " + file, fs.existsSync(path.join(TOOL, file)));
   }
 
   await testNameBox();
-  await testBatch();
-  testProviders();
-  testMerge();
   testDate();
   testOutputNaming();
   testAiExtraction();
-  await testOutputModes();
   await testPdfZip();
+  testCloudRemoved();
 
   console.log("\n" + "=".repeat(70));
   console.log("通过 " + passed + " 项，失败 " + failures.length + " 项。");

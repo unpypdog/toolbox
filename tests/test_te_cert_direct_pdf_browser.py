@@ -1,4 +1,8 @@
-"""Real Chromium smoke test for the fully-local certificate PDF experiment."""
+"""Real Chromium smoke test for the fully-local certificate PDF generator.
+
+This is the ONLY generation path now (the cloud DOCX→PDF route was removed),
+so this test covers the whole product: template → local PDF, no network.
+"""
 
 from pathlib import Path
 
@@ -18,8 +22,8 @@ def generate(page, text: str, template: str, merged: bool, output_name: str) -> 
     page.wait_for_function("document.querySelector('#statReady').textContent !== '0'")
     if template != "general":
         page.locator(f'input[name="template"][value="{template}"]').check()
-    page.locator("#cloudProvider").select_option("local-direct")
     page.locator("#pdfMergeToggle").set_checked(merged)
+    # 没有"选生成方式"这一步了：记录一就绪按钮就该可用。
     page.wait_for_function("!document.querySelector('#pdfBtn').disabled")
 
     with page.expect_download(timeout=120_000) as download_info:
@@ -34,10 +38,13 @@ def generate(page, text: str, template: str, merged: bool, output_name: str) -> 
 def run() -> None:
     OUTPUT.mkdir(parents=True, exist_ok=True)
     errors: list[str] = []
+    requests: list[str] = []
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         page = browser.new_page(accept_downloads=True)
         page.on("pageerror", lambda error: errors.append(str(error)))
+        # 生成过程必须一个网络请求都不发 —— 这是移除云端路径后最重要的产品承诺。
+        page.on("request", lambda request: requests.append(request.url))
 
         general = generate(
             page,
@@ -56,6 +63,12 @@ def run() -> None:
         browser.close()
 
     assert not errors, "Browser page errors: " + " | ".join(errors)
+    # 反向确认这条断言不是空转：页面自己的 file:// 请求必须被记下来。
+    # 少了它，监听器一旦没生效，requests 会是空的，下面那条 0 远程请求就变成永远通过。
+    assert requests, "No requests observed at all — the request listener is not working"
+    remote = [url for url in requests if url.startswith(("http://", "https://"))]
+    assert not remote, "Certificate generation must not touch the network: " + " | ".join(remote)
+    print(f"OK offline check — {len(requests)} local requests, 0 remote ({len(remote)} expected)")
     for output in (general, special):
         data = output.read_bytes()
         assert data.startswith(b"%PDF-"), f"Not a PDF: {output}"
@@ -65,3 +78,4 @@ def run() -> None:
 
 if __name__ == "__main__":
     run()
+

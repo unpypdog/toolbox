@@ -11,3 +11,7 @@ wheels/
 
 # Test artifacts
 *.png
+
+# 证书工具的工作目录：参考 PDF、拆包出来的 docx 部件与生成产物。
+# tests/test_te_cert_direct_pdf_browser.py 每次运行都会重建它。
+.tmp-cert-experiment/

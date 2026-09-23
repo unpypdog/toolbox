@@ -9,10 +9,10 @@
  *
  * 做法：用一个极小的 DOM 桩把 app.js 真正跑起来，然后断言：
  *   - DOMContentLoaded 处理完不抛错
- *   - 云服务下拉框真的被填上了选项
- *   - 默认值是「不转换」（绝不能预选任何会外发数据的服务）
- *   - 选中服务商后密钥输入框按声明生成
+ *   - 生成方式面板不再需要"选服务商"（云端路径已移除，只有本地一条路）
+ *   - 页面上不存在任何密钥输入框（生成证书不需要任何凭据）
  *   - refreshButtons 的行为符合预期
+ *   - AI 面板该渲染的仍然渲染
  *
  * 这是桩，不是真实浏览器。它验证不了布局与渲染，
  * 但能拦住「初始化就崩」这类最贵的问题。
@@ -136,20 +136,13 @@ function makeElement(id) {
     },
     querySelectorAll(selector) {
       // 真实 querySelectorAll 查的是**所有后代**，不只是直接子元素。
-      // 云密钥与 AI 输入框都嵌在 <label> 里（div > label > input），
-      // 只看直接子元素会查不到，那时失败反映的是桩的缺陷而不是被测代码有问题。
-      // 支持两种选择器：data-cloud-field（云转换）与 data-ai-field（AI 解析）。
-      const key =
-        selector === "[data-cloud-field]"
-          ? "cloudField"
-          : selector === "[data-ai-field]"
-            ? "aiField"
-            : null;
-      if (!key) return [];
+      // AI 输入框嵌在 <label> 里（div > label > input），只看直接子元素会查不到，
+      // 那时失败反映的是桩的缺陷而不是被测代码有问题。
+      if (selector !== "[data-ai-field]") return [];
       const found = [];
       const walk = (node) => {
         node.children.forEach((child) => {
-          if (child.dataset && child.dataset[key]) found.push(child);
+          if (child.dataset && child.dataset.aiField) found.push(child);
           walk(child);
         });
       };
@@ -287,11 +280,11 @@ function loadApp() {
   sandbox.self = sandbox;
   sandbox.globalThis = sandbox;
 
-  // 最小 CertCore / CertCloud 替身：只保留 app.js 初始化路径会碰到的部分。
+  // 最小 CertCore / CertDirectPdf / CertAi 替身：只保留 app.js 初始化路径会碰到的部分。
   //
   // 注意这里不能省命名相关的成员：DOMContentLoaded → restoreNamingSettings →
   // renderNamingPreview 会调 renderFileName，桩里缺了就在初始化中途抛错，
-  // 后续 29 条断言会跟着一起红 —— 看起来像页面坏了，其实只是桩的保真度不够。
+  // 后续断言会跟着一起红 —— 看起来像页面坏了，其实只是桩的保真度不够。
   // 之所以在桩里现写一遍而不是直接 require cert-core.js：那会把真实实现拉进来，
   // 断言就不再只盯着 app.js 的接线了。
   //
@@ -317,7 +310,6 @@ function loadApp() {
     },
   };
   sandbox.CertDirectPdf = require(path.join(TOOL, "cert-direct-pdf.js"));
-  sandbox.CertCloud = require(path.join(TOOL, "cert-cloud.js"));
   // AI 模块也要加载：app.js 的 restoreAiSettings 依赖 window.CertAi，
   // 桩里不给它就会静默跳过整个 AI 面板的渲染 —— 那是桩的保真度问题，
   // 会让人误以为页面代码坏了。（真实页面里靠 <script src> 加载。）
@@ -368,94 +360,73 @@ check(
     " 实现=" + JSON.stringify(realCore.DEFAULT_NAMING_PATTERNS),
 );
 
-console.log("\n[2] PDF 生成方式面板");
-const providerSelect = app.registry.get("cloudProvider");
-check("找到了 cloudProvider 下拉框", Boolean(providerSelect));
-check("下拉框被填上了选项", providerSelect && providerSelect.children.length >= 2,
-  providerSelect ? "只有 " + providerSelect.children.length + " 个选项" : "元素不存在");
+console.log("\n[2] PDF 生成方式面板：只剩本地一条路");
+{
+  const html = require("fs").readFileSync(path.join(TOOL, "index.html"), "utf8");
 
-if (providerSelect && providerSelect.children.length) {
-  const first = providerSelect.children[0];
-  check("第一个选项要求选择生成方式", first.value === "" && /请选择/.test(first.textContent), first.textContent);
-  check("默认未选择生成方式", providerSelect.value === "", "实际 value=" + JSON.stringify(providerSelect.value));
-
-  const ids = providerSelect.children.slice(1).map((option) => option.value);
-  check("列出本地直接生成", ids.includes(app.sandbox.CertDirectPdf.PROVIDER_ID), ids.join(", "));
-  const cloudIds = ids.filter((id) => id !== app.sandbox.CertDirectPdf.PROVIDER_ID);
-  check("仍列出全部云服务商", cloudIds.length === app.sandbox.CertCloud.PROVIDERS.length, ids.join(", "));
-  check("云服务商 id 与模块一致",
-    cloudIds.every((id) => app.sandbox.CertCloud.getProvider(id)),
-    cloudIds.join(", "));
+  // 云端路径移除后不该再有"选服务商"这一步：选它是为了决定要不要把证书发出去，
+  // 而现在根本没有第二个选项。留着它只会让用户以为还有别的生成方式。
+  for (const id of ["cloudProvider", "cloudFields", "cloudHelp", "cloudNote", "cloudSaveBtn", "cloudForgetBtn"]) {
+    check("页面不再有 #" + id, app.registry.get(id) === undefined || app.registry.get(id) === null);
+  }
+  check(
+    "页面不再出现云服务商的名字",
+    !/convertapi|cloudconvert|adobe/i.test(html),
+    "残留文案会让人以为还能走云端",
+  );
+  check(
+    "生成说明写明本机完成",
+    /零网络请求|不上传任何内容/.test(html),
+    "只有一条路时，这条路必须把「本机完成」这件事说清楚",
+  );
 }
 
 const pdfBtn = app.registry.get("pdfBtn");
-check("pdfBtn 默认禁用（没选生成方式）", pdfBtn && pdfBtn.disabled === true);
+check("pdfBtn 默认禁用（还没有可生成的记录）", pdfBtn && pdfBtn.disabled === true);
 
-console.log("\n[3] 本地方式不需要密钥，云服务仍生成密钥输入框");
-if (providerSelect) {
-  providerSelect.value = "local-direct";
-  providerSelect.dispatch("change");
-  check(
-    "本地直接生成不创建密钥输入框",
-    app.registry.get("cloudFields").querySelectorAll("[data-cloud-field]").length === 0,
-  );
-  check("本地方式明确提示不联网", /完全本地处理/.test(app.registry.get("cloudNote").textContent));
-
-  providerSelect.value = "convertapi";
-  providerSelect.dispatch("change");
-
+console.log("\n[3] 生成证书不需要任何密钥输入框");
+{
   const fields = app.registry.get("cloudFields");
-  const inputs = fields ? fields.querySelectorAll("[data-cloud-field]") : [];
-  check("生成了密钥输入框", inputs.length === 1, "实际 " + inputs.length + " 个");
-  if (inputs.length) {
-    check("输入框是密码类型", inputs[0].type === "password");
-    check("输入框 data-cloud-field = secret", inputs[0].dataset.cloudField === "secret");
-    check("输入框带 placeholder", Boolean(inputs[0].placeholder));
-  }
-
-  const adobeOption = providerSelect.children.find((option) => option.value === "adobe");
-  if (adobeOption) {
-    providerSelect.value = "adobe";
-    providerSelect.dispatch("change");
-    const adobeInputs = app.registry.get("cloudFields").querySelectorAll("[data-cloud-field]");
-    check("Adobe 生成两个输入框", adobeInputs.length === 2, "实际 " + adobeInputs.length);
-    check(
-      "Adobe 字段名是 clientId / clientSecret",
-      adobeInputs.map((i) => i.dataset.cloudField).join(",") === "clientId,clientSecret",
-      adobeInputs.map((i) => i.dataset.cloudField).join(","),
-    );
-  }
-
-  // 回到未选择，确认能收回
-  providerSelect.value = "";
-  providerSelect.dispatch("change");
+  check("页面没有密钥输入容器", !fields);
   check(
-    "退回未选择状态后密钥框被清空",
-    app.registry.get("cloudFields").querySelectorAll("[data-cloud-field]").length === 0,
+    "app.js 里不再引用 data-cloud-field",
+    !/data-cloud-field/.test(require("fs").readFileSync(path.join(TOOL, "app.js"), "utf8")),
   );
 }
 
-console.log("\n[4] 隐私提示随选择变化");
-const cloudNote = app.registry.get("cloudNote");
-check("存在隐私提示元素", Boolean(cloudNote));
-check(
-  "未选服务商时提示不联网",
-  cloudNote && /不联网|只在本机/.test(cloudNote.textContent),
-  cloudNote ? cloudNote.textContent : "",
-);
-
-if (providerSelect) {
-  providerSelect.value = "convertapi";
-  providerSelect.dispatch("change");
+console.log("\n[4] 隐私提示只讲本地，AI 面板单独讲外发");
+{
+  const source = require("fs").readFileSync(path.join(TOOL, "app.js"), "utf8");
+  // 生成路径不联网这件事现在是静态文案，不再随"选择"变化 ——
+  // 所以断言的是"不存在 cloudNote 这个会变的元素"，以及 AI 面板仍会提示外发。
+  const aiNote = app.registry.get("aiNote");
+  check("存在 AI 隐私提示元素", Boolean(aiNote));
   check(
-    "选中服务商后提示会外发",
-    cloudNote && /发送给|外发/.test(cloudNote.textContent),
-    cloudNote ? cloudNote.textContent : "",
+    "未选 AI 服务时提示不联网",
+    aiNote && /不联网|只在本机/.test(aiNote.textContent),
+    aiNote ? aiNote.textContent : "",
+  );
+
+  const aiProvider = app.registry.get("aiProvider");
+  if (aiProvider && aiProvider.children.length) {
+    aiProvider.value = "deepseek";
+    aiProvider.dispatch("change");
+    check(
+      "选中 AI 服务后提示会外发",
+      aiNote && /发送给|外发/.test(aiNote.textContent),
+      aiNote ? aiNote.textContent : "",
+    );
+    aiProvider.value = "";
+    aiProvider.dispatch("change");
+  }
+  check(
+    "app.js 不再有云端凭据的存取代码",
+    !/CLOUD_STORE_KEY|persistCloud|loadStoredCloud/.test(source),
   );
 }
 
 console.log("\n[5] 关键监听已绑定");
-for (const id of ["parseBtn", "pdfBtn", "cloudSaveBtn", "cloudForgetBtn", "cloudProvider"]) {
+for (const id of ["parseBtn", "pdfBtn", "pdfMergeToggle"]) {
   const element = app.registry.get(id);
   check(
     id + " 绑定了事件",
@@ -463,9 +434,11 @@ for (const id of ["parseBtn", "pdfBtn", "cloudSaveBtn", "cloudForgetBtn", "cloud
   );
 }
 
-// DOCX 下载入口必须不存在：证书一旦发出去就是最终版，源文件可以被随意改动，
-// 不适合交付给学员。反向断言防止以后有人"顺手"把它加回来。
-console.log("\n[5b] 不提供 DOCX 下载入口");
+// DOCX 下载入口与 DOCX 生成能力都必须不存在：
+//   1) 证书一旦发出去就是最终版，源文件可以被随意改动，不适合交付给学员；
+//   2) 生成器本身也已随云端路径删除，留着它只会让人以为还有一条 DOCX 路径。
+// 反向断言防止以后有人"顺手"把它加回来。
+console.log("\n[5b] 不提供 DOCX 下载入口，也不再有 DOCX 生成能力");
 {
   const html = require("fs").readFileSync(path.join(TOOL, "index.html"), "utf8");
   const source = require("fs").readFileSync(path.join(TOOL, "app.js"), "utf8");
@@ -476,13 +449,12 @@ console.log("\n[5b] 不提供 DOCX 下载入口");
   check(
     "页面没有任何返回 ZIP 的 DOCX 下载入口",
     !/生成 ZIP/.test(html) && !/下载.*\.docx/i.test(html),
-    "DOCX 只应作为云转换的中间产物，不能给用户",
+    "源文件可以被随意改动，不适合交付给学员",
   );
-  // 但 DOCX 生成能力本身必须保留 —— 云转换要上传它
   check(
-    "DOCX 生成逻辑仍在（云转换依赖它）",
-    /buildCertificateItems/.test(source) && /CertCore\.buildDocx/.test(source),
-    "删掉生成能力会让 PDF 转换失效",
+    "app.js 里不再有 DOCX 生成逻辑",
+    !/buildCertificateItems/.test(source) && !/CertCore\.buildDocx/.test(source),
+    "它只服务于已移除的云端转换，留着就是死代码",
   );
 }
 
@@ -637,10 +609,10 @@ console.log("\n[10] PDF 输出方式开关");
     );
   }
 
-  // app.js 必须把这个开关接到 convertBatch 的 batch 参数上，
+  // app.js 必须把这个开关接到 CertDirectPdf.generateBatch 的 batch 参数上，
   // 否则开关只是个装饰，勾不勾都走同一条路
   check(
-    "generatePdf 把开关接到了 convertBatch 的 batch 参数",
+    "generatePdf 把开关接到了 generateBatch 的 batch 参数",
     /batch:\s*wantMerged/.test(source) && /pdfMergeToggle\.checked/.test(source),
     "开关没接线的话，勾选不会改变输出方式",
   );

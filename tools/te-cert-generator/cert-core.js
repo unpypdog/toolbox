@@ -1,13 +1,17 @@
 /**
- * TE 操作培训证书 —— 纯本地生成核心。
+ * TE 操作培训证书 —— 纯本地核心：名单解析、字段校验、输出命名、模板读取、排版槽位。
  *
- * 这里是从「TE批量生成培训证书/TE操作培训证书生成器/generate_certs.py」移植过来的等价实现，
- * 目标是在浏览器里做到与原 Python 脚本**逐字节一致**的 word/document.xml 结果：
- *   - 同样的占位符替换顺序与范围（全局替换，现代 wps 分支与 VML 回退分支各一份，必须同时改）
- *   - 同样的排版常量（3 字姓名左移姓名框、长医院名加宽文本框）
+ * 这里只负责「数据」与「版式」两件事，不产出任何 DOCX：
+ *   - 名单 → 记录（parseDate / validateRecord / prepareRecords*）
+ *   - 记录 → 输出文件名（assignOutputNames / renderFileName）
+ *   - 模板 docx → 背景图字节（readZip / extractImage / assertTemplate）
+ *   - 记录 → 打印槽位（printSlots，供 cert-direct-pdf 用 Canvas 画字）
  *
- * 与 Python 版的差异及原因：
- *   - 插值前做 XML 转义：Python 版遇到姓名/医院名里的 & < > 会生成损坏的 docx
+ * 历史：原先还有一条「填充 word/document.xml 生成 DOCX」的路径，那是为云端
+ * DOCX→PDF 服务商准备的中间产物。云转换移除后它没有任何调用方（本地直接 PDF 走的是
+ * 「模板背景图 + Canvas 文字」），已整段删除。模板 docx 现在只作为**背景图载体**存在。
+ *
+ * 沿用的原 generate_certs.py 经验（仍适用于 PDF 版式）：
  *   - 不把去重用的 _2 后缀写进证书姓名：Python 版会把「张三_2」印在证书上
  *   - 日期解析放进逐行 try：Python 版一条坏数据会中断整批
  *
@@ -24,52 +28,6 @@
   "use strict";
 
   /* ------------------------------------------------------------------ 常量 */
-
-  // 模板里两套几何常量：<mc:Choice> 用 DrawingML（EMU），<mc:Fallback> 用 VML（pt）。
-  // Word 读前者，WPS/旧版读后者，改一处不改另一处会出现「Word 里正常、WPS 里错位」。
-  const NAME_BOX_POS_ORIG = "3145790"; // 姓名框水平偏移 3145790 EMU
-  const NAME_BOX_POS_NEW = "2917190"; // 3 字及以上姓名左移 200000 EMU（约 0.55cm）
-  const NAME_BOX_MARGIN_ORIG = "247.7pt";
-  const NAME_BOX_MARGIN_NEW = "229.7pt";
-  // 姓名框宽度（DrawingML 的 extent cx / VML 的 width，两者必须同步改）
-  const NAME_BOX_CX_ORIG = "1581150"; // 124.5pt
-  const NAME_BOX_WIDTH_ORIG = "124.5pt";
-  const NAME_BOX_WIDTH_PT_ORIG = 124.5;
-
-  // 姓名框能放几个字：可用宽 = 124.5 - 3.6×2 = 117.3pt，字号 36pt → 恰好 3 字
-  const NAME_BOX_BASE_CHARS = 3;
-  const NAME_BOX_PT_PER_CHAR = 36; // 字号即字宽（全角）
-  const NAME_BOX_CX_PER_CHAR = 457200; // 36pt = 457200 EMU
-  // 每个多出的字，框左移一个字宽（36pt），把右边缘钉死。
-  // 推导：3 字规则左移 3145790-2917190 = 228600 EMU = 18pt，那是「3 字比 2 字」
-  // 的既有补偿；4 字及以上要保证与医院名的间隙不变，必须再让出整整一个字宽。
-  const NAME_BOX_SHIFT_PER_CHAR_EMU = 457200;
-  const NAME_BOX_SHIFT_PER_CHAR_PT = 36;
-  // 从 "229.7pt" 派生出数值，避免同一个数字在两处各写一遍而漂移
-  const NAME_BOX_MARGIN_PT_NEW = Number(NAME_BOX_MARGIN_NEW.replace("pt", ""));
-
-  const HOSPITAL_CX_ORIG = "2466340"; // 医院名文本框宽度 2466340 EMU
-  const HOSPITAL_WIDTH_ORIG = "194.2pt";
-  const HOSPITAL_CX_BASE_CHARS = 7; // 7 字以内保持原宽
-  const HOSPITAL_CX_PER_CHAR = 254000; // 每多 1 字加宽 254000 EMU（≈20pt）
-  const HOSPITAL_PT_PER_CHAR = 20;
-
-  // 颁发日期在模板里被拆成 5 个 run：前缀 / 3 空格 / 「月 」/ 2 空格 / 「 日」。
-  // 这些字符串是排版本身的一部分，两个模板完全一致。
-  //
-  // 注意：替换串必须带上完整的 <w:t ...> 开标签！原 generate_certs.py 的替换串里
-  // 就写着 `颁发日期: {year} 年 {month} </w:t>`，因为它把开标签一起匹配掉了。
-  // 漏掉开标签会生成 `<w:r>颁发日期: …</w:t>` 这种不合法结构——Word 能容错打开，
-  // 但 LibreOffice / python-docx 会判为损坏 XML，且首部空格失去 xml:space 保护。
-  const DATE_TOKENS = [
-    [
-      '<w:t xml:space="preserve">颁发日期:     年  </w:t>',
-      '<w:t xml:space="preserve">颁发日期: {year} 年 {month} </w:t>',
-    ],
-    ['<w:t xml:space="preserve">   </w:t>', '<w:t xml:space="preserve"></w:t>'],
-    ['<w:t xml:space="preserve"> 日</w:t>', '<w:t xml:space="preserve">{day} 日</w:t>'],
-    ['<w:t xml:space="preserve">  </w:t>', '<w:t xml:space="preserve"></w:t>'],
-  ];
 
   const TEMPLATES = {
     general: { id: "general", label: "一般版本", file: "template-general.docx" },
@@ -158,14 +116,7 @@
     "经专业培训评估，您已通过超声探头引导定位和震动控制瞬时弹性成像技术的相关理论\n" +
     "及实际操作培训的考核，具备独立规范操作iLivTouch®设备资质，授予正式认证!";
 
-  /* ------------------------------------------------------------ XML / 文本 */
-
-  function escapeXml(value) {
-    return String(value)
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;");
-  }
+  /* --------------------------------------------------------------- 文本处理 */
 
   function stripOuter(value) {
     return String(value == null ? "" : value).trim();
@@ -521,107 +472,6 @@
     return cleaned || fallback || "未命名";
   }
 
-  /* ----------------------------------------------------- DOCX（模板填充） */
-
-  /** 复刻 generate_certs.py 的替换链，输出改好的 document.xml。 */
-  function fillDocumentXml(xml, record) {
-    const name = escapeXml(record.name);
-    const hospital = escapeXml(record.hospital);
-    const year = record.year;
-    const month = record.month;
-    const day = record.day;
-
-    let out = xml;
-    out = out.split(">姓名<").join(">" + name + "<");
-    out = out.split(">医院名称<").join(">" + hospital + "<");
-
-    // 3 字及以上姓名：姓名框左移，保持与医院名之间的视觉间距
-    if (record.name.length >= 3) {
-      out = out
-        .split("<wp:posOffset>" + NAME_BOX_POS_ORIG + "</wp:posOffset>")
-        .join("<wp:posOffset>" + NAME_BOX_POS_NEW + "</wp:posOffset>");
-      out = out
-        .split("margin-left:" + NAME_BOX_MARGIN_ORIG)
-        .join("margin-left:" + NAME_BOX_MARGIN_NEW);
-    }
-
-    // 4 字及以上姓名：姓名框必须同步加宽，否则文本框放不下。
-    //
-    // 修复的 bug：模板姓名框固定 124.5pt 宽，左右边距各 3.6pt，可用 117.3pt；
-    // 36pt 字号下只放得下 3 个字（108pt）。4 字姓名（144pt）会溢出，
-    // Word 导出时第 4 个字被裁掉——"欧阳娜娜" 只显示 "欧阳娜"。
-    // 原 generate_certs.py 也有同样的问题（只左移、从不加宽），一并修掉。
-    //
-    // 关键：加宽必须全部往左长，把文本框【右边缘】钉死不动。
-    //
-    // 为什么不能往右长：姓名右边紧邻医院名，右边缘往右爬会吃掉两者之间的间隙。
-    // 实测（页坐标）：
-    //   3 字姓名右边缘 418.4pt，医院名起点 429.9pt → 间隙 11.5pt
-    //   若右边缘随之右移 36pt，间隙只剩 3.5pt，姓名几乎贴上医院名。
-    // 所以每个多出的字，左移量 = 一个字宽（36pt），而不是半个字宽。
-    // 这样右边缘恒定 418.4pt，与 3 字姓名的间隙完全一致。
-    //
-    // 代价：姓名整体偏左，4 字时文字左边缘约 79pt（页边距 72pt），
-    // 接近但不越过左边距。背景图该行横向是空白（已扫描确认），可以容纳。
-    if (record.name.length > NAME_BOX_BASE_CHARS) {
-      const extra = record.name.length - NAME_BOX_BASE_CHARS;
-      const shiftEmu = NAME_BOX_SHIFT_PER_CHAR_EMU * extra;
-      const newPos = String(Number(NAME_BOX_POS_NEW) - shiftEmu);
-      const shiftPt = NAME_BOX_SHIFT_PER_CHAR_PT * extra;
-      const newMargin = (NAME_BOX_MARGIN_PT_NEW - shiftPt).toFixed(1) + "pt";
-
-      out = out
-        .split("<wp:posOffset>" + NAME_BOX_POS_NEW + "</wp:posOffset>")
-        .join("<wp:posOffset>" + newPos + "</wp:posOffset>");
-      out = out
-        .split("margin-left:" + NAME_BOX_MARGIN_NEW)
-        .join("margin-left:" + newMargin);
-
-      // DrawingML 的 extent(cx) 与 VML 的 width 必须同步，否则 Word 正常但 WPS 错位
-      const newCx = String(Number(NAME_BOX_CX_ORIG) + extra * NAME_BOX_CX_PER_CHAR);
-      const newWidth = (NAME_BOX_WIDTH_PT_ORIG + extra * NAME_BOX_PT_PER_CHAR).toFixed(1) + "pt";
-      out = out.split(NAME_BOX_CX_ORIG).join(newCx);
-      out = out.split("width:" + NAME_BOX_WIDTH_ORIG).join("width:" + newWidth);
-    }
-
-    // 医院名超过 7 字：同步加宽 DrawingML 的 cx/extent 与 VML 的 width
-    if (record.hospital.length > HOSPITAL_CX_BASE_CHARS) {
-      const extra = record.hospital.length - HOSPITAL_CX_BASE_CHARS;
-      const newCx = String(Number(HOSPITAL_CX_ORIG) + extra * HOSPITAL_CX_PER_CHAR);
-      const newWidth = (194.2 + extra * HOSPITAL_PT_PER_CHAR).toFixed(1) + "pt";
-      out = out.split(HOSPITAL_CX_ORIG).join(newCx);
-      out = out.split("width:" + HOSPITAL_WIDTH_ORIG).join("width:" + newWidth);
-    }
-
-    const tokens = { year: year, month: month, day: day };
-    DATE_TOKENS.forEach(([from, to]) => {
-      const target = to.replace(/\{(\w+)\}/g, (_, key) => tokens[key]);
-      out = out.split(from).join(target);
-    });
-
-    return out;
-  }
-
-  /**
-   * 用模板字节生成一份证书 docx。
-   * @param {Uint8Array} templateBytes 原始 .docx 字节
-   * @param {object} record 含 name / hospital / year / month / day
-   * @returns {Promise<Uint8Array>} 新的 .docx 字节
-   */
-  async function buildDocx(templateBytes, record) {
-    const entries = await readZip(templateBytes);
-    const output = [];
-    for (const entry of entries) {
-      let data = entry.data;
-      if (entry.name === "word/document.xml") {
-        const xml = new TextDecoder("utf-8", { fatal: true }).decode(data);
-        data = new TextEncoder().encode(fillDocumentXml(xml, record));
-      }
-      output.push({ name: entry.name, data: data });
-    }
-    return writeZip(output);
-  }
-
   /**
    * 读取同目录下的模板（走 fetch）。只在 http(s) 或测试环境可用：
    * file:// 下 Chromium 一律拒绝 fetch，报 TypeError: Failed to fetch。
@@ -873,7 +723,11 @@
   }
 
   /**
-   * 校验模板字节，并确认里面确实有 word/document.xml。
+   * 校验模板字节。
+   *
+   * 模板现在**只作为背景图载体**使用（PDF 版式来自 PRINT_LAYOUT，文字由 Canvas 现画），
+   * 所以这里查的就是背景图在不在 —— 光有 word/document.xml 而缺 media，
+   * 生成时才会在更深的地方炸，错误信息也更难懂。
    * @param {Uint8Array} bytes
    * @param {string} label 出错信息里用的名字
    */
@@ -882,15 +736,19 @@
       throw new Error(`${label} 不是有效的 docx 文件（缺少 ZIP 头）。`);
     }
     const entries = await readZip(bytes);
-    if (!entries.some((entry) => entry.name === "word/document.xml")) {
-      throw new Error(`${label} 缺少 word/document.xml，无法用于生成。`);
+    const hasImage = entries.some(
+      (entry) =>
+        entry.name.startsWith("word/media/") && !entry.name.endsWith("/") && entry.data.length > 0,
+    );
+    if (!hasImage) {
+      throw new Error(`${label} 里没有背景图（word/media/），无法用于生成证书。`);
     }
     return bytes;
   }
 
   /**
-   * 把一条记录展开成打印用的文本片段（供 HTML 打印版渲染）。
-   * 日期文本与 docx 版完全一致：`颁发日期: 2025 年 06 月 19 日`
+   * 把一条记录展开成打印用的文本片段（供 cert-direct-pdf 绘制文字层）。
+   * 日期文本是成品证书上的最终形态：`颁发日期: 2025 年 06 月 19 日`
    * @param {object} record 含 name / hospital / year / month / day
    * @param {string} templateId general | special
    */
@@ -928,27 +786,6 @@
     TEMPLATES: TEMPLATES,
     DEFAULT_NAMING_PATTERNS: DEFAULT_NAMING_PATTERNS,
     MAX_ROWS: MAX_ROWS,
-    constants: {
-      NAME_BOX_POS_ORIG: NAME_BOX_POS_ORIG,
-      NAME_BOX_POS_NEW: NAME_BOX_POS_NEW,
-      NAME_BOX_MARGIN_ORIG: NAME_BOX_MARGIN_ORIG,
-      NAME_BOX_MARGIN_NEW: NAME_BOX_MARGIN_NEW,
-      NAME_BOX_CX_ORIG: NAME_BOX_CX_ORIG,
-      NAME_BOX_WIDTH_ORIG: NAME_BOX_WIDTH_ORIG,
-      NAME_BOX_WIDTH_PT_ORIG: NAME_BOX_WIDTH_PT_ORIG,
-      NAME_BOX_BASE_CHARS: NAME_BOX_BASE_CHARS,
-      NAME_BOX_PT_PER_CHAR: NAME_BOX_PT_PER_CHAR,
-      NAME_BOX_CX_PER_CHAR: NAME_BOX_CX_PER_CHAR,
-      NAME_BOX_SHIFT_PER_CHAR_EMU: NAME_BOX_SHIFT_PER_CHAR_EMU,
-      NAME_BOX_SHIFT_PER_CHAR_PT: NAME_BOX_SHIFT_PER_CHAR_PT,
-      NAME_BOX_MARGIN_PT_NEW: NAME_BOX_MARGIN_PT_NEW,
-      HOSPITAL_CX_ORIG: HOSPITAL_CX_ORIG,
-      HOSPITAL_WIDTH_ORIG: HOSPITAL_WIDTH_ORIG,
-      HOSPITAL_CX_BASE_CHARS: HOSPITAL_CX_BASE_CHARS,
-      HOSPITAL_CX_PER_CHAR: HOSPITAL_CX_PER_CHAR,
-      DATE_TOKENS: DATE_TOKENS,
-    },
-    escapeXml: escapeXml,
     normalizeHeader: normalizeHeader,
     matchHeaderRow: matchHeaderRow,
     parseDate: parseDate,
@@ -962,8 +799,6 @@
     stripOutputExtension: stripOutputExtension,
     renderFileBase: renderFileBase,
     renderFileName: renderFileName,
-    fillDocumentXml: fillDocumentXml,
-    buildDocx: buildDocx,
     fetchBytes: fetchBytes,
     base64ToBytes: base64ToBytes,
     assertTemplate: assertTemplate,

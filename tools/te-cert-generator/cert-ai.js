@@ -23,7 +23,8 @@
  *   Authorization: Bearer <key>
  *   { model: "deepseek-flash", messages: [...], response_format: {type:"json_object"} }
  *   CORS：预检 200 且回显 Origin，**错误响应也带 Access-Control-Allow-Origin**，
- *        所以浏览器直连可用，且 401 时能读到真实错误（不像 Adobe 会被 CORS 掩盖）。
+ *        所以浏览器直连可用，且 401 时能读到真实错误正文，而不是被浏览器
+ *        包装成一句误导性的「没有 CORS 头」。
  *   同一个 deepseek-flash 模型同时支持图片与 json 输出，所以文本/图片共用一条路径。
  */
 (function (root, factory) {
@@ -673,7 +674,7 @@
 
     const rawText = await response.text();
     if (!response.ok) {
-      // DeepSeek 的错误响应**带 CORS 头**，所以这里能读到真实原因（不像 Adobe 会被掩盖）
+      // DeepSeek 的错误响应**带 CORS 头**，所以这里能读到真实原因，不会被浏览器掩盖
       let detail = "";
       try {
         const json = JSON.parse(rawText);

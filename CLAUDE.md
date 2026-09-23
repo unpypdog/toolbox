@@ -22,17 +22,16 @@ toolbox/
 │   └── te-cert-generator/  # TE 培训证书批量生成
 │       ├── index.html
 │       ├── app.js
-│       ├── cert-core.js            # 模板填充、ZIP、日期解析（无网络）
-│       ├── cert-direct-pdf.js      # 固定背景 + Canvas 文字的离线 PDF 生成
-│       ├── cert-cloud.js           # 云端 DOCX→PDF 适配层（浏览器直连）
+│       ├── cert-core.js            # 名单解析、校验、命名、模板读取、排版槽位（无网络）
+│       ├── cert-direct-pdf.js      # 固定背景 + Canvas 文字的离线 PDF 生成（唯一生成路径）
 │       ├── cert-ai.js              # AI 名单抽取（OpenAI 兼容接口，支持图片）
-│       ├── cert-merge.js           # PDF 合并（备用工具，页面未加载，见文件头说明）
 │       ├── styles.css
 │       ├── build-templates.js      # docx → base64 载荷（改了 docx 必须重跑）
-│       ├── template-*.docx         # 证书模板
+│       ├── template-*.docx         # 证书模板（只作为背景图载体）
 │       ├── template-*.b64.js       # 模板载荷（file:// 下靠它读模板）
 │       ├── vendor/pdf-lib.min.js   # 本地 PDF 组装库（含 MIT 许可）
 │       └── xlsx.full.min.js
+│       # 注：cert-cloud.js / cert-merge.js 已删除，见硬约束 12
 └── tests/                  # 测试文件
     ├── screenshots/        # 测试截图（gitignore）
     ├── test_lung_marker.py
@@ -40,90 +39,70 @@ toolbox/
     ├── test_tax_calc.py
     ├── test_toolbox.py
     ├── test_training_cert_batch_fill.py
-    ├── test_te_cert_cloud_core.js        # 证书工具核心逻辑（纯 Node）
+    ├── test_te_cert_generator_core.js    # 证书工具核心逻辑（纯 Node）
     ├── test_te_cert_direct_pdf.js        # 本地直接 PDF 逻辑
     ├── test_te_cert_direct_pdf_browser.py # 真实 Chromium 生成测试
-    ├── lint_te_cert_cloud.js             # 证书工具接线检查（纯 Node）
+    ├── lint_te_cert_generator.js         # 证书工具接线检查（纯 Node）
     └── test_te_cert_dom_smoke.js         # 证书工具 DOM 冒烟（最小 DOM 桩）
 ```
 
-### te-cert-generator 的十五条硬约束
+### te-cert-generator 的十二条硬约束
 
-改这个工具前先读这十五条，都是踩过的坑：
+改这个工具前先读这十二条，都是踩过的坑：
 
 1. **模板改了必须重跑载荷**：`node tools/te-cert-generator/build-templates.js`。
    `file://` 下 Chromium 拒绝 fetch 同目录的 docx，模板只能靠 base64 载荷用
-   `<script src>` 加载。忘了重跑会用旧模板静默生成证书，`lint_te_cert_cloud.js`
+   `<script src>` 加载。忘了重跑会用旧模板静默生成证书，`lint_te_cert_generator.js`
    会逐字节比对拦下这种情况。
-2. **CSP 里的 `connect-src` 是白名单**：云转换的三个服务商域名写死在这里，
-   不是通配 `https:`。新增服务商要同时改 `cert-cloud.js` 的端点和 `index.html`
-   的 CSP，linter 会核对两边是否一致。
-3. **隐私文案必须区分生成路径**：`local-direct` 全程本地、不上传；云转换会把证书内容
-   发给用户选定的服务商。页面必须讲清楚两者差异，不能把云路径写成“不上传”。
-4. **不提供 DOCX 下载入口**：证书一旦发出去就是最终版，源文件可以被随意改动，
-   不适合交付给学员。DOCX 只作为云转换的**中间产物**存在 ——
-   `CertCore.buildDocx` 与 `buildCertificateItems` 必须保留（PDF 转换依赖它们），
-   但页面上不能有任何"下载 / 导出 DOCX / ZIP 里是 docx"的入口或文案。
+2. **CSP 里的 `connect-src` 是白名单，且只该剩 AI 一个域名**：
+   证书生成过程**一个网络请求都不发**（背景图与文字都在本机合成），
+   所以那里除了 `'self' file:` 就只放行 `https://api.deepseek.com`（AI 解析用）。
+   不是通配 `https:` —— 那会把这个静态页变成任意外发通道。
+   `lint_te_cert_generator.js` 会断言远程域名**恰好一个**，并扫描 index.html
+   是否还残留旧云服务商的名字。
+3. **隐私文案只讲一件事，但要讲准**：证书生成全程本机完成、不上传任何内容；
+   **AI 解析是唯一的联网路径**，且只有用户显式选了服务、填好密钥、点了「AI 解析」
+   才会把名单内容发出去。页面必须同时写清这两句 ——
+   既不能把 AI 路径写成"不上传"，也不能让用户以为生成证书会联网。
+4. **不提供 DOCX 下载入口，而且已经不产出 DOCX**：证书一旦发出去就是最终版，
+   源文件可以被随意改动，不适合交付给学员。
+   `CertCore.buildDocx` / `fillDocumentXml` 与 `app.js` 的 `buildCertificateItems`
+   原本只为云端 DOCX→PDF 服务，云转换移除后它们已**整段删除**（见约束 12）——
+   不要再以"以后可能用得上"为理由把它们加回来。
    `test_te_cert_dom_smoke.js` 的 `[5b]` 节有反向断言，防止以后被"顺手"加回来。
-5. **Adobe PDF Services 必须用它的专属令牌端点**（照搬通用 Adobe IMS 会一直 400）：
-
-   ```
-   POST https://pdf-services.adobe.io/token      ← 不是 ims-na1.adobelogin.com/ims/token/v3
-   Content-Type: application/x-www-form-urlencoded
-   client_id=<Client ID>&client_secret=<Client Secret>   ← 没有 grant_type
-   ```
-
-   两者的差别不只是端点：IMS 出错时**不带** `Access-Control-Allow-Origin`，浏览器
-   会把 400 报成"没有 CORS 头"，把真正原因盖掉；专属端点出错时带 `ACAO: *`，能读到
-   错误正文。另外 Adobe 的资产上传与成品下载都是直连 S3 预签名地址，CSP 必须放行
-   `dcplatformstorageservice-prod-us-east-1.s3-accelerate.amazonaws.com`（美国区）
-   和 `dcplatformstorageservice-prod-eu-west-1.s3.amazonaws.com`（欧洲区）。
-6. **PDF 默认逐份输出、自动打包成一个 ZIP**：证书是发给个人的，文件名形如
+5. **PDF 默认逐份输出、自动打包成一个 ZIP**：证书是发给个人的，文件名形如
    `TE操作培训证书_姓名.pdf`（同名重复用 `_2`、`_3` 区分，靠 `record.fileBase`）。
    多个文件必须**打成一个 ZIP 再下载**，且**不设开关**（`const shouldZip = files.length > 1;`）——
    连续触发多次下载会被浏览器拦（要用户逐次点"允许"），还得逐个确认保存位置；
    这是技术细节，不该让用户做选择。单文件不打包，省掉一次解压。
    合成一本多页 PDF 是唯一的开关（`els.pdfMergeToggle`，默认不勾），供归档用 ——
    默认值不能改成合并，客户明确不接受合订本（收件人得自己找自己那页）。
-   计费差异：逐份 = N 次调用；合并 = 1 次（Adobe 按「1 事务最多 50 页」计费）。
-7. **合批必须显式插分页符**（只在勾选合并时走这条路）：每份证书靠 `<w:p>` 分隔，
-   但背景图是 `<wp:anchor>` 浮动对象、不贡献段落高度，所以不能指望它撑页。
-   实测 15 份合批被引擎全排进一页。要在第二份起每份前面插入
-   `<w:p><w:r><w:br w:type="page"/></w:r></w:p>`。
-   另外合批需要每份的 `documentXml`（由 `readZip` 取出），缺了要**明确报错**，
-   不能拿 undefined 去拼、产出一份坏文档。
-8. **不要给 Adobe 的请求加自定义头**（除了 `Authorization` / `Content-Type` / `X-Api-Key`）。
-   浏览器对任何非简单请求头都会先发预检，预检没过就直接拦掉、请求到不了服务端。
-   实测 `createpdf` 端点允许的头只有 `Authorization, Content-Type, X-Api-Key,
-   User-Agent, If-Modified-Since, x-api-app-info` —— 加个看起来很无害的
-   `x-request-id` 就会报 "Request header field … is not allowed by
-   Access-Control-Allow-Headers"。**Node 的 fetch 不做预检，所以这类问题在 Node 侧
-   探测和单元测试里全都看不见**；`lint_te_cert_cloud.js` 有一条专门核对它。
+   本地路径下合批就是 pdf-lib 逐页 `addPage`，没有计费差异。
 
-9. **AI 抽取结果必须走 `core.validateRecord`，且字段名不能自创**。
+6. **AI 抽取结果必须走 `core.validateRecord`，且字段名不能自创**。
    它读的是 **`dateRaw`**（原始日期字符串），不是 `dateText`；写成后者会让**每一条**
    都报「缺少颁发日期」——看起来像"AI 没抽到日期"，实际是适配层写错了字段名。
    `cert-ai.js` 的 `mergeExtraction()` 先执行图文工作流，`normalize()` 再把合并结果转成 core
    约定的形状；姓名/医院/日期格式校验仍一律交给 core。AI 冲突与存疑只在 core 的结果上
    追加 issue，绝不能另写一套基础字段校验或绕过校验直接生成证书。
-   这条契约有断言钉着：`test_te_cert_cloud_core.js` 的 `[6]` 节。
+   这条契约有断言钉着：`test_te_cert_generator_core.js` 的 `[4]` 节。
 
-10. **每个云/AI 模块都要在 `index.html` 里真的加载**。
+7. **每个模块都要在 `index.html` 里真的加载**。
    `app.js` 里写的是 `if (!window.CertAi) return;`，漏加载 `<script>` 的后果是
    **整个面板静默不渲染**——页面上不报错，只是"那块功能不见了"。
-   `lint_te_cert_cloud.js` 会核对 `window.CertX` 与 `<script src>` 是否配套。
+   `lint_te_cert_generator.js` 会核对 `window.CertX` 与 `<script src>` 是否配套。
 
-11. **AI 提示词里绝对不能出现具体日期与机构名**（示例只能用占位符）。
+8. **AI 提示词里绝对不能出现具体日期与机构名**（示例只能用占位符）。
    真踩过：示例里写了「〈某医院〉 2025年10月10日」，用户在文本框里写的是
    `26年1月12日`、图片上没有日期，结果模型把**示例里的日期**当成了真实信息，
    套到所有记录上，产出一批日期全错的证书。
    现在提示词里的具体值一律写成 `〈机构全称A〉`／`〈日期B〉` 这类占位符，
-   `test_te_cert_cloud_core.js` 的 `[6]` 节有一条断言扫描提示词里是否残留真实日期。
+   `test_te_cert_generator_core.js` 的 `[4]` 节有一条断言扫描提示词里是否残留真实日期。
    **闸门要同时查两位数年份**：用户和图片里最常写的就是「26年1月12日」「22年10月20日」，
    只查 `\d{4}[-年]…` 会漏掉它们 —— 实测正是这个形态的示例值被模型照搬。
    现在的断言两种形态都查（四位数年份 + `\d{1,2}年\d{1,2}月\d{1,2}日`）。
 
-12. **图文合并必须代码化：AI 只提取事实，绝不能直接输出最终 `records`**。
+9. **图文合并必须代码化：AI 只提取事实，绝不能直接输出最终 `records`**。
     旧版把四步流程全写进提示词，让模型同时 OCR、理解作用范围、决定覆盖优先级并输出最终名单；
     这会让相互冲突的规则随模型版本漂移。现在契约固定为：
     - `imageRows`：图片逐行事实（`name / hospital / date / note / evidence`）；
@@ -144,11 +123,11 @@ toolbox/
     改写成新名再传给其余赋值。少了任何一件，模型用原名做的点名赋值就查不到目标，转而在兜底
     分支新增一行 —— 一次改名变成两个人，且失败是静默的（只在多出来的那行挂条 issue）。
 
-    护栏必须是行为测试，不再只扫描提示词关键句。`test_te_cert_cloud_core.js` 的 `[6]` 节至少覆盖：
+    护栏必须是行为测试，不再只扫描提示词关键句。`test_te_cert_generator_core.js` 的 `[4]` 节至少覆盖：
     全局覆盖、named/rows/ordered 优先级、同级冲突、ambiguous 保留原值、姓名纠正去重、
     改名后原名点名赋值仍命中同一行、旧版 `records` 不能绕过本地工作流。
 
-13. **`max_tokens` 不能小、思考模式必须显式关掉，截断检查必须在 `JSON.parse` 之前**。
+10. **`max_tokens` 不能小、思考模式必须显式关掉，截断检查必须在 `JSON.parse` 之前**。
     这三条是同一次故障的三个面，别只改一个：
     DeepSeek 的**思考模式默认开启、思考力度默认 high**，而**思考 token 与正文共用
     `max_tokens`**。所以旧的 `max_tokens: 4096` 会被思考吃光，正文一个字都没轮上 ——
@@ -159,29 +138,36 @@ toolbox/
     换模型或想提高推理力度时，这两个值要一起动。
     另外**截断检查必须放在 `JSON.parse` 之前**：被截断的 json 解析出来是半个对象，
     走到 parse 只会得到「模型输出的不是合法 json」+200 字乱码，真正的原因被盖掉。
-    护栏在 `test_te_cert_cloud_core.js` 的 `[6]` 节：默认预算下限、接口上限、
+    护栏在 `test_te_cert_generator_core.js` 的 `[4]` 节：默认预算下限、接口上限、
     `thinking` 已关、可被 `options.maxTokens` 覆盖、以及「带图片的截断文案必须
     说明图片没法分批」。
 
-14. **`assignments.note` 不是「存疑」通道，代码一律忽略它**。
+11. **`assignments.note` 不是「存疑」通道，代码一律忽略它**。
     表达不确定的**唯一**通道是 `scope: "ambiguous"`。曾经提示词写着「任何不确定都写进对应
     note」，而 `applyValue` 把所有 `note` 都升级成行级 issue：模型给一条 **`global`** 赋值附了
     说明性 note（"文字说明称图片解析日期为 22 年 10 月 20 号，未指明具体人员或行"），
     而 global 作用于每一行 —— **整批记录全部变成「需处理」，用户一条都生成不了**。
     现在：`note` 不在提示词输出格式里、不参与合并，真出现只在 warnings 留一句线索；
     真存疑必须用 `ambiguous`（保留图片原值 + 标「需处理」），那才是该拦的情况。
-    护栏：`test_te_cert_cloud_core.js` 的 `[6]` 节有「带说明性 note 的全局赋值照常覆盖、
+    护栏：`test_te_cert_generator_core.js` 的 `[4]` 节有「带说明性 note 的全局赋值照常覆盖、
     不把整批标成需处理」与「真存疑走 ambiguous 时依然拦下」两条对照断言。
 
     相邻的一条：`record.aiSources` 用的是 core 的字段名（`name/hospital/date`），
     而表格那一列叫 `dateRaw` —— `editableCell` 里必须做 `dateRaw → date` 的映射，
     否则日期格的来源角标永远不显示（真实踩过）。
 
-15. **本地直接 PDF 是固定背景 + 栅格文字，不是 DOCX 渲染器**。
+12. **本地直接 PDF 是唯一的生成路径，它是固定背景 + 栅格文字，不是 DOCX 渲染器**。
     `cert-direct-pdf.js` 必须复用 `CertCore.extractImage()` 与 `printSlots()`，原始 JPEG 不重压缩，
     动态文字由浏览器 Canvas 使用微软雅黑绘制为透明 PNG 后叠加；因此文字不可搜索/选中。
     不要重新引入整套中文字体嵌入（旧方案约 23.9MB 且 pdf-lib 子集化曾产出空文字）。
     改坐标、字号或字距后，必须运行 `test_te_cert_direct_pdf_browser.py`，并与 Word 参照图做视觉核对。
+
+    **云端 DOCX→PDF 路径（以及为它服务的整条 DOCX 生成管线）是有意删除的，不要加回来**：
+    它的唯一价值是产出可搜索文字，而代价是一整套云适配层、密钥存储、服务商下拉框、
+    CSP 白名单、合批分页符这些只在特定引擎下成立的补丁。
+    同时删掉的还有 `cert-merge.js`（为"逐份转换后再前端合并"准备，而合批现在由
+    pdf-lib 逐页 `addPage` 原生支持）。
+    反向断言在 `test_te_cert_generator_core.js` 的 `[6]` 节与 `lint_te_cert_generator.js` 的 `[2]` 节。
 
 
 ### te-cert-generator 参考资料：字体与姓名框几何
@@ -201,47 +187,50 @@ Word 渲染时找不到  →  回退到 微软雅黑（Microsoft YaHei）
 而且 Word 原生 DOCX 里 `<w:b/>` 数量为 **0** —— 字重完全靠字体名表达。所以回退成
 雅黑后，三处文字的字重差异全部消失，**一律是雅黑 Regular**。
 
-这条直接决定了两件事：换字体时要对齐的是雅黑而非思源黑体；云端转换之所以可行，
-正是因为微软雅黑是 Windows 自带字体，转换引擎大概率有。
+这条直接决定了两件事：换字体时要对齐的是雅黑而非思源黑体；`cert-direct-pdf.js` 的
+`FONT_FAMILY` 首选也正是微软雅黑（找不到才退回 Noto Sans SC / SimHei），
+所以本机渲染出来的字形与当年的 Word 成品一致。
 
 #### 二、姓名框几何模型与加宽公式
 
-模板姓名框固定 124.5pt 宽、左右内边距各 3.6pt，36pt 字号下**只放得下 3 个字**。
-文本框内文字居中，所以：
+几何现在只有**一份**实现，在 PDF 路径上，分两层：
+
+- **基准槽位**：`cert-core.js` 的 `PRINT_LAYOUT`，由 `printSlots()` 输出。
+  坐标是拿参考 PDF 实测落点锚定的，不是从 DOCX 的 EMU 常量推导的
+  （推过一版，横向差 4~18pt：Word 的 posOffset 指文字区基准，再叠加 inset 就重复计算了）。
+  姓名槽位固定 **124.5pt 宽、左右内边距各 3.6pt，36pt 字号 → 只放得下 3 个字**。
+- **加宽规则**：`cert-direct-pdf.js` 的 `resolveSlot(slot, record)`。它按姓名字数改
+  `spec.left` 与 `spec.width`，然后交给 Canvas 居中绘制。
 
 ```
-姓名左边缘（相对正文区） L(n) = A - 18n     n = 字数
-姓名右边缘              R(n) = A + 18n
-间隙到医院名             G(n) = 98 - 18n    （n=2 时 62、n=3 时 44，与实测吻合）
+2 字      left = 基准 left + 18       width = 124.5
+3 字      left = 基准 left            width = 124.5        ← 校准基准
+n ≥ 4 字  left = 基准 left − 36(n−3)  width = 124.5 + 36(n−3)
 ```
 
-实测基准落点（页坐标，A4 横向 841.92 × 595.32 pt）：
+实测基准落点（页坐标，A4 横向 841.9 × 595.3 pt）：
 
-| 锚点 | x0 | 宽度 | 距顶 | 字号 |
+| 锚点 | 文本左 | 文本宽 | 距顶 | 字号 |
 |---|---|---|---|---|
 | 姓名（3 字） | 309.89 | 108.00 | 258.52 | 36 |
 | 姓名（2 字） | 345.89 | 72.00 | 258.52 | 36 |
 | 医院名（7 字） | 429.89 | 126.00 | 273.04 | 18 |
-| 日期「颁发日期: …」整行 | 602.94 | 725.38−602.94 | 513.85 | 12 |
+| 日期「颁发日期: …」整行 | 548.47 | — | 513.85 | 12 |
 
-**4 字及以上必须同时加宽文本框并左移**，且加宽要**全部往左、右边缘钉死**：
-右边缘往右爬会吃掉与医院名之间的间隙（3 字时间隙 16.6pt，右移 36pt 就重叠了）。
-每个多出的字左移 **36pt**（一个字宽），不是半个字宽 —— 后者是"重新居中"的做法，
-在这里是错的锚点。
+**加宽必须全部往左、把文本框右边缘钉死**：右边缘往右爬会吃掉与医院名之间的间隙
+（3 字时间隙只有 16.6pt，右移 36pt 就重叠了）。每个多出的字左移 **36pt**（一个字宽），
+不是半个字宽 —— 后者是"重新居中"的做法，在这里是错的锚点。
 
-| 姓名 | posOffsetH | extent cx | margin-left | VML width |
-|---|---|---|---|---|
-| 2 字 | 3145790 | 1581150 | 247.7pt | 124.5pt |
-| 3 字 | 2917190 | 1581150 | 229.7pt | 124.5pt |
-| 4 字 | 2459990 | 2038350 | 193.7pt | 160.5pt |
+代价：姓名整体偏左，5 字时文字左边缘约 237.9pt，仍远在页边距内；
+背景图在姓名那一行横向是空白（已逐行扫描确认），加宽不会压到东西。
 
-DrawingML 的 `extent cx` 与 VML 的 `width` **必须同步改**，否则会出现
-「Word 里正常、WPS 里错位」——模板里有两套几何表示（`<mc:Choice>` 与
-`<mc:Fallback>`）。背景图在姓名那一行横向是空白（已逐行扫描确认），加宽不会压到东西。
+> 历史：模板里原本还有第二套几何表示（`<mc:Choice>` 的 DrawingML `extent cx` 与
+> `<mc:Fallback>` 的 VML `width`），两套必须同步改，否则会出现「Word 里正常、WPS 里错位」。
+> 那是 DOCX 生成路径的事，随云端转换一并删除了 —— 现在不再有这个问题。
 
-护栏在 `tests/test_te_cert_cloud_core.js` 的 `[1]` 节，覆盖 2/3/4/5 字 × 两个模板，
-并断言「右边缘恒定」与「左边缘不越页边距」。
-
+护栏在 `tests/test_te_cert_generator_core.js` 的 `[1]` 节，覆盖 2/3/4/5 字 × 两个模板，
+并断言「框右边缘恒定」「**居中文字**的右边缘恒定」「文字右边缘仍在医院名之前」。
+注意断言的是**文字**右边缘而不只是框边缘：文字在框内居中，只钉框是钉不住视觉落点的。
 
 ## 文件组织规则（必须遵守）
 
