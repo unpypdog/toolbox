@@ -139,6 +139,30 @@
     "示例中的空字符串只是格式占位符，不是本次数据。",
   ].join("\n");
 
+  const CONVERSATION_PROMPT = [
+    "你是证书名单校对助手。浏览器会给你当前记录快照、未解决问题、已确认决策、最近对话和用户本轮指令。",
+    "你的职责是理解用户想改什么并提出结构化操作；你不能直接重写整张表，也不能补造材料中不存在的事实。",
+    "姓名、医院、日期都是高风险字段。日期只允许写入 dateRaw；材料缺少日时不能自行猜日，但用户本轮明确指定某日时必须按用户指令修改，这不属于猜测。",
+    "targetId 必须逐字使用 currentRecords 里的 recordId。用户指代不清时不要猜目标，把问题写入 questions，operations 留空。",
+    "confirmedDecisions 和 recentConversation 是历史，不是不可撤销的锁。最新用户指令明确出现“确认、全部、统一、覆盖、改为”等含义时，视为已经授权覆盖旧决定，不得反复要求再次确认。",
+    "例如用户先说不补日，后来明确说“所有记录统一补为10号”，应立即提出修改操作；不能再次询问是否覆盖。",
+    "此例应输出 set_day_all 且 day=10；不要把多个不同年月拼成一个含“或”的 dateRaw 字符串。",
+    "允许的操作只有：",
+    "1. set_field：{type,targetId,field,value,reason}，field 仅 name/hospital/dateRaw；",
+    "2. set_field_many：{type,targetIds:[...],field,value,reason}，明确点名多条时使用；",
+    "3. set_field_all：{type,field,value,reason}，用户明确说全部/所有记录时使用；",
+    "4. set_field_by_source：{type,sourceImage,field,value,reason}，用户明确说第几张图片整批时使用；记录来源见 aiImageRefs；",
+    "5. set_day_all：{type,day,reason}，用户说所有记录按各自年月统一补同一个日时使用；浏览器会保留各条年月；",
+    "6. set_day_by_source：{type,sourceImage,day,reason}，某张图按各自年月统一补日时使用；",
+    "7. add_record：{type,record:{name,hospital,dateRaw},reason}；",
+    "8. remove_record：{type,targetId,reason}；",
+    "9. merge_records：{type,targetIds:[...],record:{name,hospital,dateRaw},reason}。",
+    "删除和合并必须是用户明确要求或当前重复关系非常明确；拿不准就提问。",
+    "reply 用简短中文说明你理解了什么；decisions 只写本轮可长期沿用且用户明确确认的事实。",
+    "只输出 json，不要 markdown。输出形状：",
+    '{"reply":"","operations":[],"questions":[],"decisions":[]}',
+  ].join("\n");
+
   const PROVIDERS = [
     {
       id: "deepseek",
@@ -248,6 +272,29 @@
       // 给足余量，避免 json 被截断成半个对象（详见 MAX_OUTPUT_TOKENS 的说明）
       max_tokens: options.maxTokens || MAX_OUTPUT_TOKENS,
       // 思考 token 与正文共用 max_tokens，抽名单不需要长链推理，关掉更稳
+      thinking: { type: THINKING_TYPE },
+      temperature: 0,
+      stream: false,
+    };
+  }
+
+  function buildConversationRequestBody(options) {
+    const images = (Array.isArray(options.images) ? options.images : []).filter(Boolean);
+    const context = options.context && typeof options.context === "object" ? options.context : {};
+    const userText =
+      "以下是本轮上下文。仅根据它提出操作，不要输出完整 records。\n" +
+      JSON.stringify(context) +
+      (images.length
+        ? "\n本轮另附原始图片，请只用它核对用户本轮明确要求的字段，不要重新抽取整批。"
+        : "");
+    return {
+      model: options.model,
+      messages: [
+        { role: "system", content: CONVERSATION_PROMPT },
+        { role: "user", content: buildContent(userText, images) },
+      ],
+      response_format: { type: "json_object" },
+      max_tokens: options.maxTokens || 8192,
       thinking: { type: THINKING_TYPE },
       temperature: 0,
       stream: false,
@@ -917,6 +964,7 @@
         selected: validated.status === "ready",
         aiNote: note,
         aiSources: item.aiSources || {},
+        aiImageRefs: Array.isArray(item._imageRows) ? item._imageRows.slice() : [],
         aiConflicts: Array.isArray(item.workflowConflicts) ? item.workflowConflicts.slice() : [],
       }));
     });
@@ -926,6 +974,388 @@
       unreadable: merged.unreadable,
       warnings: merged.warnings,
     };
+  }
+
+  /* ---------------------------------------------------------- 多轮修改协议 */
+
+  function operationId(index) {
+    return "op-" + Date.now().toString(36) + "-" + index;
+  }
+
+  function recordId() {
+    return "record-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 9);
+  }
+
+  /**
+   * 把模型给的操作收紧成浏览器可执行的白名单。
+   * 无效目标、未知字段、空合并都只进入 errors，不会混入可应用列表。
+   */
+  function normalizeOperations(payload, records, core) {
+    const source = payload && typeof payload === "object" ? payload : {};
+    const current = Array.isArray(records) ? records : [];
+    const byId = new Map(current.map((item) => [String(item.recordId || ""), item]));
+    const allowedFields = new Set(["name", "hospital", "dateRaw"]);
+    const operations = [];
+    const errors = [];
+
+    function addSetOperation(raw, index, targetId, suffix, forcedValue) {
+      const field = raw.field === "date" ? "dateRaw" : String(raw.field || "");
+      if (!byId.has(targetId)) {
+        errors.push("第 " + (index + 1) + " 个修改找不到目标记录。");
+        return;
+      }
+      if (!allowedFields.has(field)) {
+        errors.push("第 " + (index + 1) + " 个修改使用了不允许的字段。");
+        return;
+      }
+      const before = byId.get(targetId);
+      operations.push({
+        id: operationId(String(index) + "-" + suffix),
+        type: "set_field",
+        reason: String((raw && raw.reason) || "").trim(),
+        targetId,
+        field,
+        value: String(forcedValue === undefined ? (raw.value == null ? "" : raw.value) : forcedValue).trim(),
+        targetName: before.name || "未命名记录",
+        before: String(before[field] || ""),
+      });
+    }
+
+    function idsFromSource(sourceImage) {
+      const image = Number(sourceImage);
+      return current
+        .filter((record) =>
+          Array.isArray(record.aiImageRefs) &&
+          record.aiImageRefs.some((ref) => Number(ref && ref.image) === image),
+        )
+        .map((record) => String(record.recordId || ""))
+        .filter(Boolean);
+    }
+
+    function addDayOperations(raw, index, targetIds) {
+      const day = Number(raw.day);
+      if (!Number.isInteger(day) || day < 1 || day > 31) {
+        errors.push("第 " + (index + 1) + " 个统一补日操作的 day 无效。");
+        return;
+      }
+      targetIds.forEach((targetId, offset) => {
+        const record = byId.get(targetId);
+        let parts;
+        try {
+          parts = core.parseDateParts(record && record.dateRaw);
+        } catch {
+          parts = null;
+        }
+        if (!parts || !parts.year || !parts.month) {
+          errors.push("「" + ((record && record.name) || "未命名记录") + "」缺少可保留的年月，未自动补日。");
+          return;
+        }
+        addSetOperation(
+          Object.assign({}, raw, { field: "dateRaw" }),
+          index,
+          targetId,
+          "day-" + offset,
+          parts.year + "/" + parts.month + "/" + day,
+        );
+      });
+    }
+
+    (Array.isArray(source.operations) ? source.operations : []).forEach((raw, index) => {
+      const type = String((raw && raw.type) || "");
+      const base = {
+        id: operationId(index),
+        type,
+        reason: String((raw && raw.reason) || "").trim(),
+      };
+
+      if (type === "set_field") {
+        const targetId = String(raw.targetId || "");
+        addSetOperation(raw, index, targetId, "single");
+        return;
+      }
+
+      if (type === "set_field_many" || type === "set_field_all" || type === "set_field_by_source") {
+        let targetIds = [];
+        if (type === "set_field_all") targetIds = current.map((record) => String(record.recordId || ""));
+        else if (type === "set_field_by_source") targetIds = idsFromSource(raw.sourceImage);
+        else if (Array.isArray(raw.targetIds)) {
+          targetIds = Array.from(new Set(raw.targetIds.map(String))).filter((id) => byId.has(id));
+        }
+        if (!targetIds.length) {
+          errors.push("第 " + (index + 1) + " 个批量修改没有匹配到记录。");
+          return;
+        }
+        targetIds.forEach((targetId, offset) => addSetOperation(raw, index, targetId, offset));
+        return;
+      }
+
+      if (type === "set_day_all" || type === "set_day_by_source") {
+        const targetIds = type === "set_day_all"
+          ? current.map((record) => String(record.recordId || ""))
+          : idsFromSource(raw.sourceImage);
+        if (!targetIds.length) {
+          errors.push("第 " + (index + 1) + " 个统一补日操作没有匹配到记录。");
+          return;
+        }
+        addDayOperations(raw, index, targetIds);
+        return;
+      }
+
+      if (type === "add_record") {
+        const item = raw.record && typeof raw.record === "object" ? raw.record : {};
+        const validated = core.validateRecord({
+          name: String(item.name || "").trim(),
+          hospital: String(item.hospital || "").trim(),
+          dateRaw: String(item.dateRaw || item.date || "").trim(),
+        });
+        operations.push(Object.assign(base, {
+          record: Object.assign({}, validated, { recordId: recordId() }),
+        }));
+        return;
+      }
+
+      if (type === "remove_record") {
+        const targetId = String(raw.targetId || "");
+        if (!byId.has(targetId)) {
+          errors.push("第 " + (index + 1) + " 个删除找不到目标记录。");
+          return;
+        }
+        operations.push(Object.assign(base, {
+          targetId,
+          targetName: byId.get(targetId).name || "未命名记录",
+        }));
+        return;
+      }
+
+      if (type === "merge_records") {
+        const targetIds = Array.isArray(raw.targetIds)
+          ? Array.from(new Set(raw.targetIds.map(String))).filter((id) => byId.has(id))
+          : [];
+        if (targetIds.length < 2) {
+          errors.push("第 " + (index + 1) + " 个合并不足两条有效目标。");
+          return;
+        }
+        const item = raw.record && typeof raw.record === "object" ? raw.record : {};
+        const validated = core.validateRecord({
+          name: String(item.name || "").trim(),
+          hospital: String(item.hospital || "").trim(),
+          dateRaw: String(item.dateRaw || item.date || "").trim(),
+        });
+        operations.push(Object.assign(base, {
+          targetIds,
+          targetNames: targetIds.map((id) => byId.get(id).name || "未命名记录"),
+          record: Object.assign({}, validated, { recordId: targetIds[0] }),
+        }));
+        return;
+      }
+
+      errors.push("第 " + (index + 1) + " 个操作类型不受支持。");
+    });
+
+    return {
+      reply: String(source.reply || "").trim(),
+      operations,
+      questions: (Array.isArray(source.questions) ? source.questions : [])
+        .map((item) => String(item || "").trim())
+        .filter(Boolean),
+      decisions: (Array.isArray(source.decisions) ? source.decisions : [])
+        .map((item) => String(item || "").trim())
+        .filter(Boolean),
+      errors,
+    };
+  }
+
+  function revalidateRecord(record, core, resolvedField) {
+    const validated = core.validateRecord({
+      name: record.name || "",
+      hospital: record.hospital || "",
+      dateRaw: record.dateRaw || "",
+    });
+    const conflictField = resolvedField === "dateRaw" ? "date" : resolvedField;
+    const remainingConflicts = Array.isArray(record.aiConflicts)
+      ? record.aiConflicts.filter((item) => !conflictField || item.field !== conflictField)
+      : [];
+    remainingConflicts.forEach((item) => {
+      if (item && item.message) pushUnique(validated.issues, item.message);
+    });
+    validated.status = validated.issues.length ? "invalid" : "ready";
+    return Object.assign({}, record, validated, {
+      recordId: record.recordId || recordId(),
+      aiNote: remainingConflicts.length ? record.aiNote || "" : "",
+      aiConflicts: remainingConflicts,
+    });
+  }
+
+  /** 纯函数式应用：返回新数组，调用方确认前的 state 不会被改动。 */
+  function applyOperations(records, operations, core) {
+    let next = (records || []).map((record) => Object.assign({}, record));
+    const applied = [];
+    (operations || []).forEach((operation) => {
+      if (operation.type === "set_field") {
+        const index = next.findIndex((item) => item.recordId === operation.targetId);
+        if (index < 0) return;
+        next[index][operation.field] = operation.value;
+        next[index] = revalidateRecord(next[index], core, operation.field);
+        applied.push(operation.id);
+      } else if (operation.type === "add_record") {
+        next.push(revalidateRecord(Object.assign({}, operation.record), core));
+        applied.push(operation.id);
+      } else if (operation.type === "remove_record") {
+        const before = next.length;
+        next = next.filter((item) => item.recordId !== operation.targetId);
+        if (next.length !== before) applied.push(operation.id);
+      } else if (operation.type === "merge_records") {
+        const indexes = operation.targetIds
+          .map((id) => next.findIndex((item) => item.recordId === id))
+          .filter((index) => index >= 0);
+        if (indexes.length < 2) return;
+        const insertAt = Math.min.apply(Math, indexes);
+        const targets = new Set(operation.targetIds);
+        next = next.filter((item) => !targets.has(item.recordId));
+        next.splice(insertAt, 0, revalidateRecord(Object.assign({}, operation.record), core));
+        applied.push(operation.id);
+      }
+    });
+    next.forEach((record, index) => {
+      record.lineNo = index + 1;
+    });
+    return { records: next, applied };
+  }
+
+  /**
+   * 对最常见、且用户意图已经完全明确的批量命令做本地解析。
+   * 这不是自由文本 AI：只认很窄的句式，命中后仍走 normalizeOperations 和确认预览。
+   * 好处是模型不会在“用户已经确认”之后继续循环追问，也不会漏掉 23 条里的某几条。
+   */
+  function deriveExplicitOperations(instruction, records, core) {
+    const text = String(instruction || "").replace(/\s+/g, "").trim();
+    if (!text) return null;
+
+    const allDay = text.match(
+      /(?:全部|所有|全体|整批)(?:\d+条)?记录.*?日期.*?(?:补(?:为|成)?|改(?:为|成)?|设(?:为|成)?).*?(\d{1,2})(?:号|日)/,
+    );
+    if (allDay) {
+      const day = Number(allDay[1]);
+      const result = normalizeOperations(
+        {
+          reply: "已按当前表格中每条记录原有的年月，统一补为 " + day + " 号。",
+          operations: [{ type: "set_day_all", day, reason: "用户明确要求全部记录统一补日" }],
+          questions: [],
+          decisions: ["全部记录按各自年月统一补为 " + day + " 号"],
+        },
+        records,
+        core,
+      );
+      if (result.operations.length) return result;
+    }
+
+    const imageNumber = { 一: 1, 二: 2, 三: 3, 四: 4 };
+    const byImage = text.match(
+      /第([一二三四1-4])张(?:图片|图像|图).*?(?:日期|年月).*?(\d{2,4})年(?:的)?(\d{1,2})月份?/,
+    );
+    if (byImage) {
+      const sourceImage = imageNumber[byImage[1]] || Number(byImage[1]);
+      let year = Number(byImage[2]);
+      if (year < 100) year += 2000;
+      const month = Number(byImage[3]);
+      const value = year + "/" + month;
+      const result = normalizeOperations(
+        {
+          reply: "已把第 " + sourceImage + " 张图片对应记录的日期改为 " + value + "。",
+          operations: [{
+            type: "set_field_by_source",
+            sourceImage,
+            field: "dateRaw",
+            value,
+            reason: "用户明确指定图片范围和年月",
+          }],
+          questions: [],
+          decisions: ["第 " + sourceImage + " 张图片对应记录的日期为 " + value],
+        },
+        records,
+        core,
+      );
+      if (result.operations.length) return result;
+    }
+    return null;
+  }
+
+  async function continueConversation(options) {
+    const endpoint = options.endpoint || (getProvider("deepseek") || {}).endpoint;
+    if (!endpoint) throw new Error("没有配置接口地址。");
+    if (!options.apiKey) throw new Error("请先填写 API Key。");
+    if (!options.model) throw new Error("请先填写模型名。");
+    if (!options.context || !String(options.context.instruction || "").trim()) {
+      throw new Error("请先写清这次要修改什么。");
+    }
+
+    const body = buildConversationRequestBody({
+      model: options.model,
+      context: options.context,
+      images: options.images,
+    });
+    if (options.onStage) options.onStage("正在理解修改要求…");
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+    const onAbort = () => controller.abort();
+    if (options.signal) {
+      if (options.signal.aborted) controller.abort();
+      else options.signal.addEventListener("abort", onAbort, { once: true });
+    }
+
+    let response;
+    try {
+      response = await fetch(endpoint, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer " + options.apiKey,
+        },
+        body: JSON.stringify(body),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      if (error && error.name === "AbortError") {
+        if (options.signal && options.signal.aborted) throw error;
+        throw new Error("请求超时（超过 " + Math.round(DEFAULT_TIMEOUT_MS / 1000) + " 秒）。");
+      }
+      throw new Error("请求失败：" + (error && error.message ? error.message : String(error)));
+    } finally {
+      clearTimeout(timer);
+      if (options.signal) options.signal.removeEventListener("abort", onAbort);
+    }
+
+    const rawText = await response.text();
+    if (!response.ok) {
+      let detail = rawText.slice(0, 200);
+      try {
+        const parsedError = JSON.parse(rawText);
+        detail = (parsedError.error && (parsedError.error.message || parsedError.error.type)) || detail;
+      } catch {
+        /* 保留原始摘要。 */
+      }
+      throw new Error("HTTP " + response.status + "：" + (detail || "未知错误"));
+    }
+    let payload;
+    try {
+      payload = JSON.parse(rawText);
+    } catch {
+      throw new Error("服务端返回的不是 JSON：" + rawText.slice(0, 200));
+    }
+    const finishReason = payload.choices && payload.choices[0] && payload.choices[0].finish_reason;
+    if (finishReason === "length") throw truncatedError(false, body.max_tokens);
+    const jsonText = extractJsonText(payload);
+    let parsed;
+    try {
+      parsed = JSON.parse(jsonText);
+    } catch {
+      throw new Error("模型输出的不是合法 json：" + jsonText.slice(0, 200));
+    }
+    const normalized = normalizeOperations(parsed, options.records, options.core);
+    return Object.assign(normalized, {
+      usage: payload.usage || null,
+      raw: jsonText,
+    });
   }
 
   /* -------------------------------------------------------------- 主流程 */
@@ -1141,6 +1571,7 @@
     PROVIDERS: PROVIDERS,
     FIELDS: FIELDS,
     PROMPT: PROMPT,
+    CONVERSATION_PROMPT: CONVERSATION_PROMPT,
     MAX_IMAGE_BYTES: MAX_IMAGE_BYTES,
     MAX_IMAGES: MAX_IMAGES,
     MAX_TOTAL_IMAGE_BYTES: MAX_TOTAL_IMAGE_BYTES,
@@ -1148,12 +1579,17 @@
     ALLOWED_IMAGE_TYPES: ALLOWED_IMAGE_TYPES,
     getProvider: getProvider,
     buildRequestBody: buildRequestBody,
+    buildConversationRequestBody: buildConversationRequestBody,
     extractJsonText: extractJsonText,
     // 导出供测试覆盖「带图片」那条分支：extractRecords 里要 mock fetch 才走得到
     truncatedError: truncatedError,
     mergeExtraction: mergeExtraction,
     normalize: normalize,
+    normalizeOperations: normalizeOperations,
+    applyOperations: applyOperations,
+    deriveExplicitOperations: deriveExplicitOperations,
     extractRecords: extractRecords,
+    continueConversation: continueConversation,
     readImageFile: readImageFile,
     addImageFiles: addImageFiles,
   };

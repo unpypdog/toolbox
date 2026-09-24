@@ -69,6 +69,13 @@ const state = {
   aiImages: [],
   /** 让用户中途取消 AI 解析 */
   aiAbort: null,
+  /** 当前本地 AI 会话（正文、图片、记录快照都进 IndexedDB；不含 API Key） */
+  aiSession: null,
+  aiSessions: [],
+  aiPending: [],
+  aiPendingDecisions: [],
+  aiRestoring: false,
+  aiSaveTimer: null,
   /** 编辑中的单元格定位，重渲染后用来恢复焦点与光标 */
   editing: null,
   /** 失焦是否由鼠标点击引起（用来决定要不要整表重绘） */
@@ -93,6 +100,10 @@ document.addEventListener("DOMContentLoaded", () => {
     "aiProvider", "aiFields", "aiHelp", "aiNote", "aiParseBtn", "aiImageInput", "aiImageLabel",
     "aiImageSummary", "aiImageName", "aiImageMeta", "aiImageList", "aiClearImageBtn",
     "aiRawBlock", "aiRawOutput",
+    "workspace", "aiBlock", "aiSessionSelect", "aiNewSessionBtn", "aiDeleteSessionBtn",
+    "aiCloseBtn", "aiSessionTitle", "aiSessionState", "aiMessages", "aiPendingBlock",
+    "aiPendingCount", "aiPendingList", "aiApplyBtn", "aiDiscardBtn", "aiComposer",
+    "aiComposerLabel", "aiSendBtn", "aiCancelBtn", "aiRecheckLabel", "aiRecheckImages",
   ].forEach((id) => {
     els[id] = document.getElementById(id);
   });
@@ -109,6 +120,7 @@ document.addEventListener("DOMContentLoaded", () => {
   restoreNamingSettings();
   bindEvents();
   render();
+  void restoreAiSessions();
 });
 
 function bindEvents() {
@@ -252,6 +264,40 @@ function bindEvents() {
 
     els.aiClearImageBtn.addEventListener("click", clearAiImages);
     els.aiParseBtn.addEventListener("click", () => void runAiParse());
+  }
+
+  if (els.aiBlock) {
+    els.aiBlock.addEventListener("toggle", () => {
+      els.workspace.classList.toggle("ai-mode", els.aiBlock.open);
+      if (els.aiBlock.open) {
+        if (!els.aiComposer.value.trim() && els.quickInput.value.trim()) {
+          els.aiComposer.value = els.quickInput.value.trim();
+        }
+        refreshButtons();
+        window.setTimeout(() => els.aiComposer.focus(), 0);
+      }
+    });
+    els.aiCloseBtn.addEventListener("click", () => {
+      els.aiBlock.open = false;
+    });
+    els.aiNewSessionBtn.addEventListener("click", () => void createAiSession());
+    els.aiDeleteSessionBtn.addEventListener("click", () => void deleteAiSession());
+    els.aiSessionSelect.addEventListener("change", () => {
+      if (els.aiSessionSelect.value) void activateAiSession(els.aiSessionSelect.value);
+    });
+    els.aiComposer.addEventListener("input", refreshButtons);
+    els.aiComposer.addEventListener("keydown", (event) => {
+      if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+        event.preventDefault();
+        void sendAiMessage();
+      }
+    });
+    els.aiSendBtn.addEventListener("click", () => void sendAiMessage());
+    els.aiApplyBtn.addEventListener("click", applyAiPending);
+    els.aiDiscardBtn.addEventListener("click", discardAiPending);
+    els.aiCancelBtn.addEventListener("click", () => {
+      if (state.aiAbort) state.aiAbort.abort();
+    });
   }
 
   document.querySelectorAll('input[name="template"]').forEach((input) => {
@@ -717,6 +763,7 @@ function placeCaretAtEnd(node) {
 /* ------------------------------------------------------------------ 渲染 */
 
 function render() {
+  ensureRecordIdsInState();
   const records = state.records;
   const ready = countReady();
   const problem = records.length - ready;
@@ -735,6 +782,8 @@ function render() {
   refreshStats();
   refreshButtons();
   refreshSelectAll();
+  renderAiWorkspace();
+  scheduleAiSessionSave();
 }
 
 function refreshStats() {
@@ -767,10 +816,18 @@ function refreshButtons() {
   // AI 解析：选了服务、且（有文本或有图片）才可点。
   // 与 PDF 按钮同样的思路 —— 配置不全时先禁用，而不是点了才报错。
   if (els.aiParseBtn) {
-    const hasContent = Boolean(els.quickInput.value.trim() || state.aiImages.length);
+    const materialText = els.aiComposer ? els.aiComposer.value.trim() : "";
+    const hasContent = Boolean(materialText || els.quickInput.value.trim() || state.aiImages.length);
     const aiReady = Boolean(state.aiProvider && window.CertAi && hasContent);
     els.aiParseBtn.disabled = state.generating || !aiReady;
     els.aiClearImageBtn.disabled = state.generating || !state.aiImages.length;
+    if (els.aiSendBtn) {
+      const hasInstruction = Boolean(materialText);
+      els.aiSendBtn.disabled = state.generating || !state.aiProvider || !hasInstruction;
+      const label = els.aiSendBtn.querySelector("span");
+      if (label) label.textContent = state.records.length ? "发送修改要求" : "提交并首次解析";
+    }
+    if (els.aiCancelBtn) els.aiCancelBtn.hidden = !state.generating || !state.aiAbort;
   }
 }
 
@@ -1202,6 +1259,267 @@ function resetNamingSettings() {
   showToast("文件命名已恢复默认值。");
 }
 
+/* ---------------------------------------------------------- AI 本地会话 */
+
+function ensureRecordIdsInState() {
+  state.records.forEach((record) => {
+    if (!record.recordId) {
+      record.recordId =
+        "record-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 9);
+    }
+  });
+}
+
+function aiMessage(role, content) {
+  return {
+    id: "message-" + Date.now().toString(36) + "-" + Math.random().toString(36).slice(2, 8),
+    role,
+    content: String(content || "").trim(),
+    createdAt: new Date().toISOString(),
+  };
+}
+
+function sessionTitleFrom(text, records) {
+  const clean = String(text || "").replace(/\s+/g, " ").trim();
+  if (clean) return clean.slice(0, 24) + (clean.length > 24 ? "…" : "");
+  const names = (records || []).map((item) => item.name).filter(Boolean).slice(0, 3);
+  return names.length ? names.join("、") + " 名单" : "新建识别会话";
+}
+
+function restoreSessionRecords(snapshot) {
+  const records = (snapshot || []).map((item, index) => {
+    const validated = window.CertCore.validateRecord({
+      name: item.name || "",
+      hospital: item.hospital || "",
+      dateRaw: item.dateRaw || "",
+    });
+    return Object.assign({}, validated, {
+      recordId: item.recordId,
+      lineNo: index + 1,
+      aiNote: item.aiNote || "",
+      aiSources: item.aiSources || {},
+      aiImageRefs: Array.isArray(item.aiImageRefs) ? item.aiImageRefs.slice() : [],
+      aiConflicts: [],
+    });
+  });
+  applyOutputNames(records);
+  state.records = records;
+  state.nextLineNo = records.length + 1;
+  state.selected = new Set(
+    records.filter((record) => record.status === "ready").map((record) => record.lineNo),
+  );
+  state.source = records.length ? "ai" : "";
+}
+
+async function restoreAiSessions() {
+  if (!window.CertAiSession) return;
+  state.aiRestoring = true;
+  try {
+    state.aiSessions = await window.CertAiSession.list();
+    const activeId = window.CertAiSession.getActiveId();
+    const target = state.aiSessions.find((item) => item.id === activeId) || state.aiSessions[0];
+    if (target) await activateAiSession(target.id, true);
+    else await createAiSession(true);
+  } catch (error) {
+    logActivity("AI 会话恢复失败，已降级为本次页面会话：" + (error.message || error));
+  } finally {
+    state.aiRestoring = false;
+    renderAiWorkspace();
+  }
+}
+
+async function createAiSession(initializing) {
+  if (!window.CertAiSession) return;
+  if (!initializing) await persistCurrentAiSession();
+  ensureRecordIdsInState();
+  const session = window.CertAiSession.createSession({
+    title: state.records.length ? "基于当前表格的新会话" : "新建识别会话",
+    providerId: state.aiProvider,
+    model: state.aiSettings.model || "",
+    recordSnapshot: window.CertAiSession.snapshotRecords(state.records),
+  });
+  state.aiSession = await window.CertAiSession.save(session);
+  state.aiPending = [];
+  state.aiPendingDecisions = [];
+  state.aiImages = [];
+  window.CertAiSession.setActiveId(state.aiSession.id);
+  state.aiSessions = await window.CertAiSession.list();
+  if (!initializing) {
+    els.aiComposer.value = "";
+    setNotice("已新建本地 AI 会话。当前表格作为这一轮的起点。", "success");
+  }
+  renderAiImageSummary();
+  renderAiWorkspace();
+  refreshButtons();
+}
+
+async function activateAiSession(id, initializing) {
+  if (!window.CertAiSession || !id) return;
+  if (!initializing) await persistCurrentAiSession();
+  const session = await window.CertAiSession.load(id);
+  if (!session) return;
+  state.aiSession = session;
+  state.aiPending = Array.isArray(session.pendingOperations)
+    ? session.pendingOperations.slice()
+    : [];
+  state.aiPendingDecisions = Array.isArray(session.pendingDecisions)
+    ? session.pendingDecisions.slice()
+    : [];
+  state.aiImages = Array.isArray(session.images) ? session.images.slice() : [];
+  restoreSessionRecords(session.recordSnapshot);
+  window.CertAiSession.setActiveId(session.id);
+
+  if (session.providerId && window.CertAi.getProvider(session.providerId)) {
+    state.aiProvider = session.providerId;
+    state.aiSettings = loadStoredAi()[session.providerId] || {};
+    els.aiProvider.value = session.providerId;
+    renderAiFields(loadStoredAi());
+  }
+  state.aiSessions = await window.CertAiSession.list();
+  renderAiImageSummary();
+  render();
+}
+
+async function deleteAiSession() {
+  if (!state.aiSession || !window.CertAiSession) return;
+  const confirmed = typeof window.confirm !== "function" ||
+    window.confirm("删除这个本地 AI 会话？其中的消息和图片会一起删除，表格当前内容不会立即清空。");
+  if (!confirmed) return;
+  const id = state.aiSession.id;
+  await window.CertAiSession.remove(id);
+  state.aiSession = null;
+  state.aiSessions = await window.CertAiSession.list();
+  if (state.aiSessions.length) await activateAiSession(state.aiSessions[0].id, true);
+  else await createAiSession(true);
+  setNotice("本地 AI 会话已删除。", "success");
+}
+
+async function persistCurrentAiSession() {
+  if (!state.aiSession || !window.CertAiSession || state.aiRestoring) return;
+  ensureRecordIdsInState();
+  state.aiSession.providerId = state.aiProvider;
+  state.aiSession.model = (state.aiSettings && state.aiSettings.model) || "";
+  state.aiSession.images = state.aiImages.slice();
+  state.aiSession.pendingOperations = state.aiPending.slice();
+  state.aiSession.pendingDecisions = state.aiPendingDecisions.slice();
+  state.aiSession.recordSnapshot = window.CertAiSession.snapshotRecords(state.records);
+  state.aiSession = await window.CertAiSession.save(state.aiSession);
+  window.CertAiSession.setActiveId(state.aiSession.id);
+  state.aiSessions = await window.CertAiSession.list();
+  renderAiSessionSelect();
+}
+
+function scheduleAiSessionSave() {
+  if (!state.aiSession || !window.CertAiSession || state.aiRestoring) return;
+  if (state.aiSaveTimer) window.clearTimeout(state.aiSaveTimer);
+  state.aiSaveTimer = window.setTimeout(() => {
+    state.aiSaveTimer = null;
+    void persistCurrentAiSession();
+  }, 220);
+}
+
+function renderAiSessionSelect() {
+  if (!els.aiSessionSelect) return;
+  const selected = state.aiSession && state.aiSession.id;
+  els.aiSessionSelect.textContent = "";
+  state.aiSessions.forEach((session) => {
+    const option = document.createElement("option");
+    option.value = session.id;
+    option.textContent = session.title || "未命名会话";
+    option.selected = session.id === selected;
+    els.aiSessionSelect.appendChild(option);
+  });
+}
+
+function renderAiMessages() {
+  if (!els.aiMessages) return;
+  els.aiMessages.textContent = "";
+  const messages = state.aiSession && Array.isArray(state.aiSession.messages)
+    ? state.aiSession.messages
+    : [];
+  if (!messages.length) {
+    const article = document.createElement("article");
+    article.className = "ai-message is-system";
+    const strong = document.createElement("b");
+    strong.textContent = "从材料开始";
+    const paragraph = document.createElement("p");
+    paragraph.textContent = "上传名单图片或输入文字，点“AI 解析”。结果进表后，可以继续用自然语言修正。";
+    article.appendChild(strong);
+    article.appendChild(paragraph);
+    els.aiMessages.appendChild(article);
+    return;
+  }
+  messages.forEach((message) => {
+    const article = document.createElement("article");
+    article.className = "ai-message is-" + (message.role || "system");
+    const strong = document.createElement("b");
+    strong.textContent = message.role === "user" ? "你" : message.role === "assistant" ? "AI" : "系统";
+    const paragraph = document.createElement("p");
+    paragraph.textContent = message.content || "";
+    article.appendChild(strong);
+    article.appendChild(paragraph);
+    els.aiMessages.appendChild(article);
+  });
+  els.aiMessages.scrollTop = els.aiMessages.scrollHeight;
+}
+
+function operationText(operation) {
+  if (operation.type === "set_field") {
+    const labels = { name: "姓名", hospital: "医院", dateRaw: "日期" };
+    return "修改「" + operation.targetName + "」的" + (labels[operation.field] || operation.field) +
+      "：" + (operation.before || "（空）") + " → " + (operation.value || "（清空）");
+  }
+  if (operation.type === "add_record") {
+    return "新增：" + (operation.record.name || "未填写姓名") + " / " +
+      (operation.record.hospital || "未填写医院") + " / " + (operation.record.dateRaw || "未填写日期");
+  }
+  if (operation.type === "remove_record") return "删除：「" + operation.targetName + "」";
+  if (operation.type === "merge_records") {
+    return "合并：" + operation.targetNames.join("、") + " → " + (operation.record.name || "未填写姓名");
+  }
+  return "未知操作";
+}
+
+function renderAiPending() {
+  if (!els.aiPendingBlock) return;
+  els.aiPendingBlock.hidden = !state.aiPending.length;
+  els.aiPendingCount.textContent = state.aiPending.length + " 项";
+  els.aiPendingList.textContent = "";
+  state.aiPending.forEach((operation) => {
+    const item = document.createElement("li");
+    item.textContent = operationText(operation) + (operation.reason ? "。理由：" + operation.reason : "");
+    els.aiPendingList.appendChild(item);
+  });
+  els.aiApplyBtn.disabled = state.generating || !state.aiPending.length;
+  els.aiDiscardBtn.disabled = state.generating || !state.aiPending.length;
+}
+
+function renderAiWorkspace() {
+  if (!els.aiSessionTitle) return;
+  renderAiSessionSelect();
+  renderAiMessages();
+  renderAiPending();
+  const session = state.aiSession;
+  els.aiSessionTitle.textContent = session ? session.title : "新建识别会话";
+  els.aiSessionState.textContent = state.aiPending.length
+    ? "待确认 " + state.aiPending.length + " 项"
+    : state.records.length
+      ? "已同步 " + state.records.length + " 条"
+      : "尚未解析";
+  els.aiDeleteSessionBtn.disabled = !session || state.generating;
+  els.aiNewSessionBtn.disabled = state.generating;
+  const continuing = state.records.length > 0;
+  els.aiComposerLabel.textContent = continuing
+    ? "继续修正当前表格（Ctrl + Enter 发送）"
+    : "首次提交：说明材料，或只上传图片";
+  els.aiRecheckLabel.hidden = !continuing || !state.aiImages.length;
+}
+
+async function sendAiMessage() {
+  if (state.records.length) await runAiConversation();
+  else await runAiParse();
+}
+
 /* ------------------------------------------------------------ AI 解析设置 */
 
 /**
@@ -1452,7 +1770,7 @@ async function runAiParse() {
   state.aiSettings = settings;
   persistAi();
 
-  const text = els.quickInput.value.trim();
+  const text = (els.aiComposer && els.aiComposer.value.trim()) || els.quickInput.value.trim();
   if (!text && !state.aiImages.length) {
     setNotice("没有可解析的内容：请填文本，或选一张名单图片。", "error");
     showToast("请先填文本或选图片。", "error");
@@ -1500,6 +1818,7 @@ async function runAiParse() {
     const records = appended ? state.records.concat(incoming) : incoming;
     applyOutputNames(records);
     state.records = records;
+    ensureRecordIdsInState();
     state.nextLineNo = records.length + 1;
     state.source = "ai";
     incoming.forEach((record) => {
@@ -1536,6 +1855,37 @@ async function runAiParse() {
         "warn",
       );
     }
+
+    if (window.CertAiSession) {
+      if (!state.aiSession) await createAiSession(true);
+      state.aiSession.initialText = text;
+      state.aiSession.extractionRaw = result.raw || "";
+      state.aiSession.title = sessionTitleFrom(text, incoming);
+      state.aiSession.providerId = state.aiProvider;
+      state.aiSession.model = settings.model;
+      state.aiSession.images = state.aiImages.slice();
+      state.aiSession.messages.push(
+        aiMessage(
+          "user",
+          (text || "（仅图片材料）") +
+            (state.aiImages.length ? "\n附图：" + state.aiImages.map((image) => image.name).join("、") : ""),
+        ),
+      );
+      state.aiSession.messages.push(
+        aiMessage(
+          "assistant",
+          "已提取 " + incoming.length + " 条记录，其中 " +
+            incoming.filter((record) => record.status === "ready").length + " 条可生成。" +
+            (notes.length ? "\n需要留意：" + notes.join("；") : ""),
+        ),
+      );
+      state.aiSession.recordSnapshot = window.CertAiSession.snapshotRecords(state.records);
+      state.aiPending = [];
+      state.aiPendingDecisions = [];
+      if (els.aiComposer) els.aiComposer.value = "";
+      await persistCurrentAiSession();
+      renderAiWorkspace();
+    }
   } catch (error) {
     resetProgress();
     const message =
@@ -1548,6 +1898,163 @@ async function runAiParse() {
     state.aiAbort = null;
     render();
   }
+}
+
+async function stageAiConversationResult(instruction, result, label) {
+  state.aiSession.messages.push(aiMessage("user", instruction));
+  const responseParts = [];
+  if (result.reply) responseParts.push(result.reply);
+  if (result.questions.length) responseParts.push("还需要确认：" + result.questions.join("；"));
+  if (result.operations.length) responseParts.push("已提出 " + result.operations.length + " 项修改，请先预览再应用。");
+  if (result.errors.length) responseParts.push("有些建议被本地规则拒绝：" + result.errors.join("；"));
+  if (!responseParts.length) responseParts.push("这轮没有可执行的修改。");
+  state.aiSession.messages.push(aiMessage("assistant", responseParts.join("\n")));
+  state.aiPending = result.operations;
+  state.aiPendingDecisions = result.decisions;
+  state.aiSession.pendingOperations = state.aiPending.slice();
+  state.aiSession.pendingDecisions = state.aiPendingDecisions.slice();
+  els.aiComposer.value = "";
+  els.aiRecheckImages.checked = false;
+  await persistCurrentAiSession();
+  render();
+
+  if (result.operations.length) {
+    setNotice((label || "AI") + "提出了 " + result.operations.length + " 项修改。请预览后确认应用。", "warn");
+  } else if (result.questions.length) {
+    setNotice("AI 需要你补充信息，没有修改表格。", "warn");
+  } else {
+    setNotice("这一轮没有产生可执行修改。", "warn");
+  }
+}
+
+async function runAiConversation() {
+  if (state.generating || !window.CertAi || !window.CertAiSession) return;
+  const instruction = els.aiComposer.value.trim();
+  if (!instruction) return;
+  if (state.aiPending.length) {
+    setNotice("请先应用或放弃上一轮待确认的修改。", "warn");
+    showToast("还有待确认修改。", "error");
+    return;
+  }
+  if (!state.aiProvider) {
+    setNotice("请先选择 AI 服务。默认不会联网。", "warn");
+    els.aiProvider.focus();
+    return;
+  }
+
+  if (!state.aiSession) await createAiSession(true);
+  ensureRecordIdsInState();
+  const localResult = window.CertAi.deriveExplicitOperations(
+    instruction,
+    state.records,
+    window.CertCore,
+  );
+  if (localResult && localResult.operations.length) {
+    await stageAiConversationResult(instruction, localResult, "本地规则已");
+    logActivity("本地识别明确批量指令：" + localResult.operations.length + " 项待确认（未联网）");
+    return;
+  }
+
+  let settings;
+  try {
+    settings = collectAiSettings();
+  } catch (error) {
+    setNotice(error.message, "error");
+    showToast(error.message, "error");
+    return;
+  }
+  const context = window.CertAiSession.buildContext(
+    state.aiSession,
+    state.records,
+    instruction,
+    8,
+  );
+  const resendImages = Boolean(els.aiRecheckImages.checked);
+
+  state.generating = true;
+  state.aiAbort = new AbortController();
+  state.aiSettings = settings;
+  persistAi();
+  render();
+  setProgress(0, 1, "正在理解修改要求…");
+  try {
+    const result = await window.CertAi.continueConversation({
+      context,
+      records: state.records,
+      images: resendImages ? state.aiImages : [],
+      apiKey: settings.apiKey,
+      model: settings.model,
+      endpoint: settings.endpoint,
+      core: window.CertCore,
+      signal: state.aiAbort.signal,
+      onStage: (stage) => setProgress(0, 1, stage),
+    });
+
+    resetProgress();
+    await stageAiConversationResult(instruction, result, "AI 已");
+    logActivity(
+      "AI 多轮校对：" + result.operations.length + " 项待确认" +
+        (resendImages ? "（本轮重新查看了原图）" : ""),
+    );
+  } catch (error) {
+    resetProgress();
+    const message = error && error.name === "AbortError"
+      ? "已取消本轮 AI 请求。"
+      : error.message || "AI 对话失败。";
+    setNotice(message, "error");
+    showToast(message, "error");
+    logActivity("AI 对话失败：" + message);
+  } finally {
+    state.generating = false;
+    state.aiAbort = null;
+    render();
+  }
+}
+
+function applyAiPending() {
+  if (!state.aiPending.length || state.generating) return;
+  const result = window.CertAi.applyOperations(
+    state.records,
+    state.aiPending,
+    window.CertCore,
+  );
+  state.records = result.records;
+  applyOutputNames(state.records);
+  state.nextLineNo = state.records.length + 1;
+  state.selected = new Set(
+    state.records.filter((record) => record.status === "ready").map((record) => record.lineNo),
+  );
+  const count = result.applied.length;
+  if (state.aiSession) {
+    state.aiSession.decisions = Array.from(
+      new Set((state.aiSession.decisions || []).concat(state.aiPendingDecisions || [])),
+    );
+    state.aiSession.messages.push(aiMessage("system", "已由你确认并应用 " + count + " 项修改。"));
+    state.aiSession.pendingOperations = [];
+    state.aiSession.pendingDecisions = [];
+  }
+  state.aiPending = [];
+  state.aiPendingDecisions = [];
+  render();
+  void persistCurrentAiSession();
+  setNotice("已应用 " + count + " 项修改，并重新执行本地字段校验。", "success");
+  showToast("修改已应用。", "success");
+  logActivity("确认并应用 AI 修改 " + count + " 项");
+}
+
+function discardAiPending() {
+  if (!state.aiPending.length || state.generating) return;
+  const count = state.aiPending.length;
+  state.aiPending = [];
+  state.aiPendingDecisions = [];
+  if (state.aiSession) {
+    state.aiSession.pendingOperations = [];
+    state.aiSession.pendingDecisions = [];
+    state.aiSession.messages.push(aiMessage("system", "你放弃了上一轮的 " + count + " 项修改，表格未改变。"));
+  }
+  renderAiWorkspace();
+  void persistCurrentAiSession();
+  setNotice("已放弃 AI 修改，表格没有变化。", "success");
 }
 
 /* ------------------------------------------------------- 输出与下载工具 */

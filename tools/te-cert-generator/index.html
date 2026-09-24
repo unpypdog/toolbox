@@ -36,6 +36,7 @@
     <script defer src="./vendor/pdf-lib.min.js"></script>
     <script defer src="./cert-direct-pdf.js"></script>
     <script defer src="./cert-ai.js"></script>
+    <script defer src="./cert-ai-session.js"></script>
     <script defer src="./app.js"></script>
   </head>
   <body>
@@ -87,8 +88,51 @@
             <button id="insertSampleBtn" class="button button--ghost" type="button">插入示例</button>
           </div>
 
-          <details id="aiBlock" class="import-block">
-            <summary>格式复杂、想用图片、或图 + 文混合？交给 AI 解析</summary>
+          <details id="aiBlock" class="import-block ai-workbench">
+            <summary>
+              <span>AI 名单工作台</span>
+              <small>识图、提取、连续修正；会话只保存在本机</small>
+            </summary>
+
+            <div class="ai-session-bar">
+              <label for="aiSessionSelect">
+                <span>本机会话</span>
+                <select id="aiSessionSelect" aria-label="选择 AI 会话"></select>
+              </label>
+              <button id="aiNewSessionBtn" class="text-button" type="button">新会话</button>
+              <button id="aiDeleteSessionBtn" class="text-button is-danger" type="button">删除</button>
+              <button id="aiCloseBtn" class="text-button ai-close" type="button">返回设置</button>
+            </div>
+
+            <div class="ai-thread-heading">
+              <div>
+                <p class="eyebrow">LOCAL AI SESSION</p>
+                <h3 id="aiSessionTitle">新建识别会话</h3>
+              </div>
+              <span id="aiSessionState" class="ai-session-state">尚未解析</span>
+            </div>
+
+            <div id="aiMessages" class="ai-messages" aria-live="polite">
+              <article class="ai-message is-system">
+                <b>工作方式</b>
+                <p>先提交文字或图片提取名单。之后可以继续说“把张三的医院改成…”或“合并这两条”。AI 只提出修改建议，你确认后才会改表。</p>
+              </article>
+            </div>
+
+            <section id="aiPendingBlock" class="ai-pending" hidden aria-labelledby="ai-pending-heading">
+              <div class="ai-pending__head">
+                <div>
+                  <p class="eyebrow">REVIEW CHANGES</p>
+                  <h4 id="ai-pending-heading">待确认的修改</h4>
+                </div>
+                <span id="aiPendingCount">0 项</span>
+              </div>
+              <ul id="aiPendingList" class="ai-operation-list"></ul>
+              <div class="action-row">
+                <button id="aiApplyBtn" class="button button--secondary button--small" type="button">应用到表格</button>
+                <button id="aiDiscardBtn" class="button button--ghost button--small" type="button">放弃</button>
+              </div>
+            </section>
 
             <p class="panel-note">
               规则解析只认固定写法（顿号隔开姓名 + 医院名以「医院/卫生院」等词结尾 + 标准日期）。
@@ -150,6 +194,25 @@
               <summary>查看 AI 原始返回（某列没解析出来时先看这里）</summary>
               <pre id="aiRawOutput" class="raw-output"></pre>
             </details>
+
+            <div class="ai-composer">
+              <label class="field-label" for="aiComposer">
+                <span id="aiComposerLabel">首次提交：说明材料，或只上传图片</span>
+              </label>
+              <textarea id="aiComposer" rows="4" spellcheck="false"
+                placeholder="例如：请从图片提取人员、医院和日期。解析后可继续说：把王敏的医院改成南京鼓楼医院。"></textarea>
+              <label id="aiRecheckLabel" class="ai-recheck" for="aiRecheckImages" hidden>
+                <input id="aiRecheckImages" type="checkbox" />
+                <span>本轮同时重新查看已上传的原图（会增加图片 token）</span>
+              </label>
+              <div class="action-row">
+                <button id="aiSendBtn" class="button button--primary" type="button" disabled>
+                  <span>发送修改要求</span>
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 12 16-8-5 16-3-6-8-2Zm8 2 3-3" /></svg>
+                </button>
+                <button id="aiCancelBtn" class="button button--ghost button--small" type="button" hidden>取消</button>
+              </div>
+            </div>
 
             <p id="aiNote" class="service-note">
               默认不联网。选了服务并填好密钥后才会把名单内容（或图片）发给该服务。

@@ -93,8 +93,14 @@ const scripts = (indexHtml.match(/<script[^>]*src="([^"]+)"/g) || []).map((t) =>
   t.replace(/.*src="|"/g, ""),
 );
 check("页面引用了 cert-ai.js", scripts.includes("./cert-ai.js"), scripts.join(", "));
+check("页面引用了 AI 会话模块", scripts.includes("./cert-ai-session.js"), scripts.join(", "));
 check("页面引用了本地直接 PDF 模块", scripts.includes("./cert-direct-pdf.js"), scripts.join(", "));
 check("页面从本地 vendor 加载 pdf-lib", scripts.includes("./vendor/pdf-lib.min.js"), scripts.join(", "));
+check(
+  "pdf-lib 不再请求缺失的 source map",
+  !/sourceMappingURL=pdf-lib\.min\.js\.map/.test(read("vendor/pdf-lib.min.js")),
+  "浏览器开发服务器会为缺失的 .map 打一条无害但干扰排错的 404",
+);
 check(
   "pdf-lib 的 MIT 许可证随 vendor 文件保留",
   fs.existsSync(path.join(TOOL, "vendor", "pdf-lib.LICENSE.md")),
@@ -125,6 +131,7 @@ const globalModules = [
   { global: "CertCore", file: "cert-core.js" },
   { global: "CertDirectPdf", file: "cert-direct-pdf.js" },
   { global: "CertAi", file: "cert-ai.js" },
+  { global: "CertAiSession", file: "cert-ai-session.js" },
 ];
 for (const item of globalModules) {
   const uses = new RegExp("window\\.?" + item.global + "\\b|window\\[\"" + item.global + "\"\\]").test(appJs);
@@ -267,6 +274,21 @@ check(
 check(
   "已选图片列表容器存在（逐张移除要用）",
   /<ul id="aiImageList"/.test(indexHtml) && /"aiImageList"/.test(appJs),
+);
+check(
+  "多轮工作台包含会话、消息、修改预览和输入框",
+  ["aiSessionSelect", "aiMessages", "aiPendingList", "aiComposer", "aiApplyBtn", "aiDiscardBtn"]
+    .every((id) => new RegExp('id="' + id + '"').test(indexHtml)),
+);
+check(
+  "AI 修改必须经过预览确认再应用",
+  /continueConversation\(/.test(appJs) && /applyAiPending\(/.test(appJs) &&
+    /CertAi\.applyOperations\(/.test(appJs),
+);
+check(
+  "会话使用 IndexedDB 而不是把图片塞进 localStorage",
+  /indexedDB\.open\(/.test(read("cert-ai-session.js")) &&
+    !/localStorage\.setItem\([^\n]*images/.test(read("cert-ai-session.js")),
 );
 
 // 「某列没解析出来」必须能当场看出原因：模型没给，还是给了没落地。

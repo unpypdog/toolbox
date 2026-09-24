@@ -314,6 +314,7 @@ function loadApp() {
   // 桩里不给它就会静默跳过整个 AI 面板的渲染 —— 那是桩的保真度问题，
   // 会让人误以为页面代码坏了。（真实页面里靠 <script src> 加载。）
   sandbox.CertAi = require(path.join(TOOL, "cert-ai.js"));
+  sandbox.CertAiSession = require(path.join(TOOL, "cert-ai-session.js"));
 
   const source = fs.readFileSync(path.join(TOOL, "app.js"), "utf8");
   const context = vm.createContext(sandbox);
@@ -539,7 +540,11 @@ if (aiProvider) {
 }
 
 console.log("\n[9] AI 相关监听已绑定");
-for (const id of ["aiProvider", "aiParseBtn", "aiImageInput", "aiImageLabel", "aiImageList", "aiClearImageBtn"]) {
+for (const id of [
+  "aiProvider", "aiParseBtn", "aiImageInput", "aiImageLabel", "aiImageList", "aiClearImageBtn",
+  "aiBlock", "aiSessionSelect", "aiNewSessionBtn", "aiDeleteSessionBtn", "aiCloseBtn",
+  "aiComposer", "aiSendBtn", "aiApplyBtn", "aiDiscardBtn", "aiCancelBtn",
+]) {
   const element = app.registry.get(id);
   check(
     id + " 绑定了事件",
@@ -548,7 +553,9 @@ for (const id of ["aiProvider", "aiParseBtn", "aiImageInput", "aiImageLabel", "a
         element.hasListener("change") ||
         element.hasListener("drop") ||
         element.hasListener("dragover") ||
-        element.hasListener("input")),
+        element.hasListener("input") ||
+        element.hasListener("toggle") ||
+        element.hasListener("keydown")),
   );
 }
 const aiImageLabel = app.registry.get("aiImageLabel");
