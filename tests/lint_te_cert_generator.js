@@ -250,6 +250,43 @@ check(
   "残留的 DOCX 构造代码没有任何消费方",
 );
 
+// 多图：页面必须允许选多张、状态必须是数组、传给接口的必须是 images 数组。
+// 漏掉任何一处都会静默退回「一次只认一张图」，而用户以为第二张也发出去了。
+check(
+  "图片输入允许选多张（multiple）",
+  /<input id="aiImageInput"[^>]*\bmultiple\b/.test(indexHtml),
+  "没有 multiple 就只能选一张，第二张永远传不出去",
+);
+check("app.js 通过 CertAi.addImageFiles 读取多图", /window\.CertAi\.addImageFiles\(/.test(appJs));
+check("app.js 用数组保存待解析图片", /aiImages:\s*\[\]/.test(appJs) && !/aiImage:\s*null/.test(appJs));
+check(
+  "app.js 传给 extractRecords 的是 images 数组",
+  /images:\s*state\.aiImages/.test(appJs),
+  "传 image 单值会让第二张图被静默丢掉",
+);
+check(
+  "已选图片列表容器存在（逐张移除要用）",
+  /<ul id="aiImageList"/.test(indexHtml) && /"aiImageList"/.test(appJs),
+);
+
+// 「某列没解析出来」必须能当场看出原因：模型没给，还是给了没落地。
+// 少了这个出口，用户只能对着「点击填写」猜，而这两种情况的修法完全相反。
+check(
+  "AI 原始返回有出口（模型给了什么、工作流怎么处理的）",
+  /function renderAiRaw\(/.test(appJs) &&
+    /els\.aiRawOutput\.textContent/.test(appJs) &&
+    /<pre id="aiRawOutput"/.test(indexHtml),
+);
+check("原始返回面板默认隐藏，解析后才出现", /<details id="aiRawBlock"[^>]*\bhidden\b/.test(indexHtml));
+check(
+  "整列全空时会说明「材料里没有」而不是让人干猜",
+  /function missingFieldHints\(/.test(appJs) && /missingFieldHints\(incoming\)/.test(appJs),
+);
+check(
+  "styles.css 有原始返回的样式",
+  /\.raw-output\s*[,{]/.test(styles) && /\.raw-block\s*[,{]/.test(styles),
+);
+
 /* --------------------------------------------------------- 4. 隐私文案一致性 */
 
 console.log("\n[4] 隐私说明不能自相矛盾");
@@ -291,6 +328,11 @@ for (const cls of [".generate-block", ".generate-title", ".service-select", ".se
 for (const cls of [".cloud-block", ".cloud-title", ".cloud-select", ".cloud-field", ".cloud-note"]) {
   check("styles.css 不再有 " + cls, !new RegExp(cls.replace(".", "\\.") + "\\s*[,{]").test(styles));
 }
+check(
+  "styles.css 有已选图片列表的样式",
+  /\.image-list\s*[,{]/.test(styles) && /\.image-item-remove\s*[,{]/.test(styles),
+  "没有样式时多张图会挤成一团，看不出编号顺序",
+);
 
 /* ------------------------------------------------- 6. base64 载荷与模板同步 */
 

@@ -11,6 +11,12 @@
  *   - mergeExtraction 在本地按固定优先级完成匹配、覆盖与冲突判定
  *   - 合并结果再过 core.validateRecord；缺项、冲突和 AI note 一律标红
  *   - 永远不自动补全姓名：看不清就留空并写进 note
+ *   - 日期允许缺段：素材只给到年月就只存年月，缺的那段留给用户补，绝不由模型编
+ *
+ * ⚠ 图片不只是名单表格：聊天记录截图里既有被转发进来的名单图，也有关于医院和日期的
+ *   文字说明，两者都是事实来源（前者进 imageRows/textPeople，后者进 assignments）。
+ *   所以**不能因为「输入是图片」就要求 assignments 为空** —— 那正是「聊天记录只能
+ *   提取出姓名」这个真实故障的根因（见 buildRequestBody 里的注释）。
  *
  * 为什么需要它：实测规则解析在这些输入上会失败或静默出错 ——
  *   制表符表格 → 整行塌成一条；姓名与信息分行 → 拆出一堆垃圾记录；
@@ -41,6 +47,15 @@
 
   /** 单张图片大小上限：接口限 32 MiB，这里留足余量并按常见手机照片设限 */
   const MAX_IMAGE_BYTES = 12 * 1024 * 1024;
+  /**
+   * 一次能带的图片张数上限。
+   * 真实用法就是「聊天截图（说明都在里面）+ 一张完整名单」两张，留出余量到 4 张。
+   * 再多张会把上下文预算吃光（图片 token 很贵），模型也更容易在多张图之间串行 ——
+   * 串了就是错名单，宁可让用户分两次解析再核对。
+   */
+  const MAX_IMAGES = 4;
+  /** 所有图片合计上限：先在客户端拦一道，避免把请求体撑爆 */
+  const MAX_TOTAL_IMAGE_BYTES = 24 * 1024 * 1024;
   const ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/gif", "image/webp"];
 
   /** 最终证书字段名；提取契约另外包含 imageRows / textPeople / assignments */
@@ -70,34 +85,56 @@
     "材料可能包含图片、文字或两者。必须把图片与文字分开观察，不能用一边的内容补写另一边。",
     "尤其不能拿图片日期修正文字日期，也不能把两边日期拼成第三个日期。",
     "",
+    "【图片的形态】图片不只是名单表格，还可能是聊天记录截图、便签、批注、文件说明。",
+    "图片里的**文字说明和表格里的姓名一样是材料**，不要因为某段文字不在表格里就当装饰丢掉：",
+    "- 被转发的名单图、单独发出的姓名清单：姓名进 imageRows 或 textPeople；",
+    "- 关于医院、日期的说明（「医院换成〈机构全称A〉」「日期写〈年份A〉年〈月份A〉月」这类）：",
+    "  进 assignments，作用范围按它指向的对象判断。",
+    "",
     "【图片事实 imageRows】",
     "逐行读取与人员明确关联的 name、hospital、date，保持图片行序，row 从 1 开始。",
+    "多张图片时每行还要写 image（第几张图，1 开始），并按图片先后顺序排列。",
+    "**每张图各自逐行提取，绝不跨图去重**：同一个人在多张图里都出现就各写一行，",
+    "合并与补齐由程序完成；你少写一行，人数就会少一个。",
     "图片可能只有姓名，也可能是完整表格；存在的字段都要读，读不到就留空，不要猜。",
-    "图片里的装饰、模板、示例或往期日期若不属于任何人员行，不要放进人员字段。",
+    "图片里的装饰、模板、示例或往期日期若不属于任何人员行，不要放进人员字段；",
+    "属于说明性文字的按上一条进 assignments。",
     "姓名逐字照抄；看不清就在 note 说明，不要自行纠正。evidence 填该行可见的简短原文。",
     "",
     "【文字人员 textPeople】",
-    "列出文字中明确作为证书领取人的姓名，只放姓名本身，去掉编号、职称、工号和称谓。",
-    "不要把医院、日期或说明文字当成人名。evidence 填包含该姓名的简短原文。",
+    "列出材料中明确作为证书领取人的姓名，只放姓名本身，去掉编号、职称、工号和称谓。",
+    "聊天记录里单独发出的姓名清单也算人员。不要把医院、日期或说明文字当成人名，",
+    "也不要把聊天抬头、群名、联系人昵称里的姓名当成人名。evidence 填包含该姓名的简短原文。",
     "",
     "【文字赋值 assignments】",
-    "把文字中的医院、日期以及明确的姓名纠正提取成赋值指令。这里只报告值和它在原文中的",
-    "作用范围，不执行覆盖。field 只能是 hospital、date、name；date 统一为 YYYY-MM-DD。",
+    "把材料中的医院、日期以及明确的姓名纠正提取成赋值指令。这里只报告值和它在原文中的",
+    "作用范围，不执行覆盖。field 只能是 hospital、date、name。",
+    "date 只写读到的部分：读到年月日写 YYYY-MM-DD，只读到年月写 YYYY-MM，只读到年写 YYYY。",
+    "**绝不补材料里没有的月或日**，也不要为了凑格式编造任何一段。",
     "scope 只能是下面五种：",
     "- named：原文明确定义给某些姓名，姓名放 targetNames。",
-    "- rows：原文明确定义给图片中的某些行/位置/分组，1 开始的行号放 targetRows。",
+    "- rows：原文明确定义给图片中的某些行/位置/分组，1 开始的行号放 targetRows；",
+    "  说的是整张图里的全部人时，写 targetImage 并让 targetRows 留空（程序按「那张图的全部行」",
+    "  处理）；说的是某几个人时不要用 rows，改用 named。",
     "- ordered：原文给出可与图片人员行一一对应的一列值，按顺序放 values。",
-    "- global：该字段在文字中恰好只有一个值，且没有任何按人或按组区分的迹象。",
-    "- ambiguous：出现多个候选值，但原文无法判断分别属于谁；values 放全部候选值，并说明原因。",
-    "医院和日期分别判断 scope。不要因为图片已有值就改变 scope；你只忠实报告文字表达。",
+    "- global：该字段恰好只有一个值，且没有任何按人或按组区分的迹象。",
+    "- ambiguous：出现多个候选值，但原文无法判断分别属于谁；values 放全部候选值。",
+    "  候选值明确属于某几个人、只是分不清谁配哪个值时，仍然用 ambiguous，但**必须**把这些姓名",
+    "  放进 targetNames（或把行号放进 targetRows）——留空等于告诉程序「整批都可能受影响」，",
+    "  整批都会被标成待确认；能确定范围时绝不能留空。",
+    "医院和日期分别判断 scope。不要因为图片已有值就改变 scope；你只忠实报告原文表达。",
     "name 纠正只能使用 rows，并用 targetRows 指明被纠正的图片行。",
+    "只有明确指向本次名单的说明才是赋值：提问、否定、复述、举例、寒暄都不是事实，",
+    "被否掉的候选值绝不能当成赋值；同一件事改过口的取最后一次的说法，**只输出最终那个值**，",
+    "不要同时输出被推翻的旧值 —— 两个都输出会让同一个人拿到前后矛盾的信息。",
+    "语音条、表情、被遮挡或看不清的部分读不到内容，写进 unreadable，不要猜。",
     "evidence 必须摘录支持这条赋值的简短原文；没有证据就不要创建赋值。",
     "",
     "没有相应材料时数组为空；读不到或看不清的内容一律留空。",
     "只输出 json，不要解释、不要 markdown、不要输出最终 records。输出形状必须是：",
-    '{"imageRows":[{"row":1,"name":"","hospital":"","date":"","note":"","evidence":""}],' +
+    '{"imageRows":[{"image":1,"row":1,"name":"","hospital":"","date":"","note":"","evidence":""}],' +
       '"textPeople":[{"name":"","note":"","evidence":""}],' +
-      '"assignments":[{"field":"date","value":"","values":[],"scope":"global",' +
+      '"assignments":[{"field":"date","value":"","values":[],"scope":"global","targetImage":0,' +
       '"targetNames":[],"targetRows":[],"evidence":""}],"unreadable":""}',
     "示例中的空字符串只是格式占位符，不是本次数据。",
   ].join("\n");
@@ -142,17 +179,18 @@
   /**
    * 构造 user 消息的 content。
    * 图片必须放在 user 消息里 —— 接口规定 system / assistant 里出现图片会返回 400。
+   * 多张图按数组顺序排开，编号 1..N 与提示词、user 消息里的说法一致。
    */
-  function buildContent(text, image) {
-    if (!image) return text;
-    return [
-      { type: "text", text: text },
-      {
+  function buildContent(text, images) {
+    const list = (Array.isArray(images) ? images : [images]).filter(Boolean);
+    if (!list.length) return text;
+    return [{ type: "text", text: text }].concat(
+      list.map((image) => ({
         type: "image_url",
         // 用 base64 data URL 内联，避免依赖外部图床；接口从内容判断真实格式
         image_url: { url: "data:" + image.mime + ";base64," + image.base64 },
-      },
-    ];
+      })),
+    );
   }
 
   /**
@@ -161,22 +199,39 @@
    */
   function buildRequestBody(options) {
     const text = (options.text || "").trim();
-    const image = options.image || null;
+    // 两种调用都认：images 数组（多图）与单个 image（老调用方与既有测试）
+    const images = (Array.isArray(options.images) ? options.images : [options.image]).filter(Boolean);
 
     // 模型只提取两种来源各自表达的事实与作用范围。图文合并由 mergeExtraction()
     // 在本地按固定规则执行，不能再把业务流程交给模型自由发挥。
+    //
+    // ⚠ 这里曾经对「只有图片」的输入要求 textPeople 与 assignments 必须为空，
+    //   理由是「图片只是一张名单表」。真实素材打脸：用户最自然的用法就是把整张
+    //   聊天记录截图丢进来（指令全在图里），那一行字直接把医院、日期和后补的姓名
+    //   全部丢掉，界面上只剩下姓名 —— 看起来像「AI 读不出信息」，其实是提示词禁止它读。
+    //   现在图片里的文字说明与表格里的姓名同等对待，只是仍然不许模型自己做合并。
+    //
+    // ⚠ 多张图时还要说清编号与「不许跨图去重」：合并是本地工作流的事（mergeSameNameRows），
+    //   模型自己删一行就等于少一个人，而这种少是静默的。
+    const countText = "共 " + images.length + " 张图片，按先后顺序编号 1 到 " + images.length + "。";
     let userText;
-    if (image && text) {
+    if (images.length && text) {
       userText =
         "【文字材料（用户主动输入）】\n" +
         text +
-        "\n\n【图片材料】随附的图片。\n" +
+        "\n\n【图片材料】随附 " + countText + "\n" +
         "请严格按 system 消息的提取契约，分别输出图片行、文字人员与文字赋值。" +
+        "每张图各自逐行提取并写明 image 编号，不要跨图去重。" +
         "不要合并、不要决定覆盖关系、不要输出最终 records。";
-    } else if (image) {
+    } else if (images.length) {
       userText =
-        "只有图片材料。逐行提取 imageRows；textPeople 和 assignments 必须为空。" +
-        "不要输出最终 records。";
+        "只有图片材料，" + countText + "\n" +
+        "先判断每张图是哪一类：名单/表格，还是聊天记录、便签、批注。\n" +
+        "图片里的文字说明同样算材料：被转发的名单图、单独发出的姓名清单是人员，" +
+        "关于医院或日期的说明是文字赋值。\n" +
+        "请严格按 system 消息的提取契约输出 imageRows、textPeople 与 assignments；" +
+        "每行写明它来自第几张图，不要跨图去重。" +
+        "不要合并、不要决定覆盖关系、不要输出最终 records。";
     } else {
       userText =
         "只有文字材料。提取 textPeople 与 assignments；imageRows 必须为空。\n\n" + text;
@@ -186,7 +241,7 @@
       model: options.model,
       messages: [
         { role: "system", content: PROMPT },
-        { role: "user", content: buildContent(userText, image) },
+        { role: "user", content: buildContent(userText, images) },
       ],
       // JSON Output：必须同时满足「提示词里出现 json 字样」+ 给出格式示例
       response_format: { type: "json_object" },
@@ -277,7 +332,14 @@
     if (text && list.indexOf(text) < 0) list.push(text);
   }
 
-  function makeWorkflowRow(item, source, imageRow) {
+  /**
+   * 建一行工作表记录。
+   *
+   * `imageRef` 是这张图里的坐标 { image, row }：image 是第几张图，row 是模型给的图内行号
+   * （没给就按该图内的出现顺序补）。多张图时同一个 row 会在不同图里重复出现，
+   * 所以行定位必须连图号一起看 —— 只按 row 匹配会把第 2 张图第 1 行错认成第 1 张图第 1 行。
+   */
+  function makeWorkflowRow(item, source, imageRow, imageRef) {
     const note = clean(item && item.note);
     const name = clean(item && item.name);
     return {
@@ -292,7 +354,10 @@
       },
       workflowIssues: [],
       workflowConflicts: [],
+      // 摊平后的全局序号（数组顺序），只在没写明图号的旧格式里当兜底匹配
       _imageRow: imageRow || null,
+      // 这一行来自哪些图的哪些行：同名合并后会有多条，赋值定位必须全部认得
+      _imageRows: imageRef ? [imageRef] : [],
       // 图片上的原始姓名快照，命名赋值匹配用（姓名纠正会改掉 name）
       _imageName: name,
       _fieldRules: {},
@@ -331,6 +396,7 @@
       scope: scope,
       value: assignmentValue(item),
       values: cleanList(item.values),
+      targetImage: Number(item.targetImage) > 0 ? Math.floor(Number(item.targetImage)) : 0,
       targetNames: cleanList(item.targetNames),
       targetRows: cleanRows(item.targetRows),
       evidence: clean(item.evidence),
@@ -351,15 +417,70 @@
     );
   }
 
-  function findByImageRows(records, rows) {
-    return records.filter((record) => rows.indexOf(record._imageRow) >= 0);
+  /**
+   * 按图内坐标找行。
+   *
+   * 多张图时行号会在图与图之间重复，所以匹配要看 { image, row } 整个坐标：
+   *   - 模型给了 targetImage 就只认那张图；
+   *   - 没给（老格式、单图、或原文没说是哪张图）就按行号在**所有图**里找，
+   *     并额外认「摊平后的全局序号」—— 多图被模型连续编号时也能命中。
+   * 同名合并进来的行带着多条坐标，任何一条命中都算命中，否则按行号下的赋值会找不到人。
+   */
+  function findByImageRows(records, rows, image) {
+    if (!rows.length) return [];
+    return records.filter((record) =>
+      (record._imageRows || []).some(
+        (ref) => rows.indexOf(ref.row) >= 0 && (!image || ref.image === image),
+      ) || (!image && record._imageRow != null && rows.indexOf(record._imageRow) >= 0),
+    );
+  }
+
+  /** ordered 的一列值对应哪些行：指定了图号就只用那张图的行，顺序保持摊平顺序。 */
+  function orderedTargets(records, image) {
+    const imageRecords = records.filter((record) => (record._imageRows || []).length > 0);
+    if (!image) return imageRecords;
+    return imageRecords.filter((record) =>
+      record._imageRows.some((ref) => ref.image === image),
+    );
   }
 
   function assignmentLabel(assignment) {
     return assignment.field === "date" ? "日期" : assignment.field === "hospital" ? "医院" : "姓名";
   }
 
-  function applyValue(record, assignment, value) {
+  /**
+   * 把日期文本折成可比较的键：`2022`／`2022-10`／`2022-10-20`。
+   * 只用来判断「谁更精确、说的还是不是同一个月」，严格解析仍然只由 core 负责。
+   */
+  function dateKey(value, core) {
+    if (!core || typeof core.parseDateParts !== "function") return "";
+    try {
+      const parts = core.parseDateParts(value);
+      return [parts.year, parts.month, parts.day].filter(Boolean).join("-");
+    } catch {
+      return "";
+    }
+  }
+
+  /**
+   * 文字日期是不是「更粗但说的是同一个月」——是的话就不该覆盖已经拿到的精确日期。
+   *
+   * 真实场景：聊天里说「那张图片里的名单写〈年〉年〈月〉月份左右」，同时用户还补了一张
+   * 完整名单，上面写着具体的年月日。前者只是同一个月的模糊回忆，用它覆盖等于把用户刚
+   * 补进来的「日」又抹掉，还得让人再填一遍。
+   *
+   * 只在**包含关系**下让路：文字更粗、且图上的值以它为前缀。文字说了别的月份/年份
+   * （那就是真正的改写指令）或者本身更精确时，一律按老规矩由文字覆盖。
+   */
+  function keepsMorePreciseDate(current, incoming, core) {
+    const next = dateKey(incoming, core);
+    const existing = dateKey(current, core);
+    if (!next || !existing) return false;
+    if (next === existing) return false; // 一样精确，走正常覆盖（等价于不改）
+    return existing.indexOf(next + "-") === 0;
+  }
+
+  function applyValue(record, assignment, value, warnings, core) {
     const text = clean(value);
     const label = assignmentLabel(assignment);
     if (!text) {
@@ -379,24 +500,92 @@
     }
     if (previous && previous.priority > priority) return;
 
+    if (
+      assignment.field === "date" &&
+      keepsMorePreciseDate(record.dateRaw, text, core)
+    ) {
+      if (warnings) {
+        pushUnique(
+          warnings,
+          "文字日期「" + text + "」只到年月，没有覆盖更精确的「" + record.dateRaw +
+            "」（同一个月，保留更完整的那条）",
+        );
+      }
+      record._fieldRules[assignment.field] = { priority: priority, value: text };
+      return;
+    }
+
     if (assignment.field === "date") record.dateRaw = text;
     else record[assignment.field] = text;
     record.aiSources[assignment.field] = "text:" + assignment.scope;
     record._fieldRules[assignment.field] = { priority: priority, value: text };
   }
 
+  /**
+   * rows 作用范围到底覆盖哪些行。
+   *
+   * 实测踩到的坑（DeepSeek 真实返回）：聊天里说「那张图片里的名单写〈年份〉年〈月份〉月」，
+   * 模型给了 `scope:"rows"` + `targetImage:1`，**targetRows 却是空的** —— 它眼里的「那张图
+   * 里的名单」就是整张图，不需要逐行点名。旧实现只认行号，于是赋值找不到目标、
+   * 一整列日期全空，而提示词里那句「找不到目标」用户根本看不出该怎么办。
+   *
+   * 现在的口径：行号为空 = 这一组就是「那张图里的人」；连图号都没写就是「所有图片里的人」。
+   * **姓名纠正不放宽** —— 那条一旦放宽就会把整批人改成同一个名字。
+   */
+  function rowsTargets(records, assignment) {
+    if (assignment.targetRows.length) {
+      return findByImageRows(records, assignment.targetRows, assignment.targetImage);
+    }
+    if (assignment.field === "name") return [];
+    return orderedTargets(records, assignment.targetImage);
+  }
+
   function targetsForAssignment(records, assignment) {
     if (assignment.scope === "global") return records.slice();
     if (assignment.scope === "named") return findByNames(records, assignment.targetNames);
-    if (assignment.scope === "rows") return findByImageRows(records, assignment.targetRows);
+    if (assignment.scope === "rows") return rowsTargets(records, assignment);
     return [];
   }
 
-  function markAmbiguous(records, assignment, warnings) {
+  /**
+   * ambiguous 没写目标时标记哪些行。
+   *
+   * 不能再无条件「整批」：一条没写目标的 ambiguous 会把整批标成需处理，用户一条都生成不了
+   * （约束 11 记的那次事故就是这么来的）。收窄按证据强弱挑一层，不做并集：
+   *   1. 同一字段上有过**点名到人**的赋值 → 就用那批人（点名是最强的证据）；
+   *   2. 只有过按行/按图的赋值 → 用那批行；
+   *   3. 一处都没有 → 才退回整批。
+   * 实测例子：聊天先给图片里那批人定了日期，又对另外几个点名的人改了口 ——
+   * 那条没收窄的 ambiguous 把 19 个与它无关的人一起标红了。
+   */
+  function ambiguousTargets(records, assignments, assignment) {
+    const collect = (scope) => {
+      const list = [];
+      const push = (record) => {
+        if (list.indexOf(record) < 0) list.push(record);
+      };
+      assignments.forEach((other) => {
+        if (!other || other === assignment || other.field !== assignment.field) return;
+        if (other.scope !== scope) return;
+        if (scope === "named") findByNames(records, other.targetNames).forEach(push);
+        else rowsTargets(records, other).forEach(push);
+      });
+      return list;
+    };
+
+    const byName = collect("named");
+    if (byName.length) return byName;
+    const byRows = collect("rows");
+    if (byRows.length) return byRows;
+    return records.slice();
+  }
+
+  function markAmbiguous(records, assignments, assignment, warnings) {
     let targets = [];
     if (assignment.targetNames.length) targets = findByNames(records, assignment.targetNames);
-    else if (assignment.targetRows.length) targets = findByImageRows(records, assignment.targetRows);
-    else targets = records.slice();
+    else if (assignment.targetRows.length) {
+      targets = findByImageRows(records, assignment.targetRows, assignment.targetImage);
+    } else targets = ambiguousTargets(records, assignments, assignment);
 
     const values = assignment.values.length ? assignment.values : [assignment.value].filter(Boolean);
     const message =
@@ -406,7 +595,7 @@
     targets.forEach((record) => addRowIssue(record, message, assignment.field));
   }
 
-  function applyAssignments(records, assignments, warnings, fieldFilter) {
+  function applyAssignments(records, assignments, warnings, fieldFilter, core) {
     assignments
       .filter((assignment) => assignment && fieldFilter(assignment))
       .sort((left, right) => {
@@ -416,7 +605,7 @@
       })
       .forEach((assignment) => {
         if (assignment.scope === "ambiguous") {
-          markAmbiguous(records, assignment, warnings);
+          markAmbiguous(records, assignments, assignment, warnings);
           return;
         }
         if (assignment.field === "name" && assignment.scope !== "rows") {
@@ -424,7 +613,7 @@
           return;
         }
         if (assignment.scope === "ordered") {
-          const imageRecords = records.filter((record) => record._imageRow != null);
+          const imageRecords = orderedTargets(records, assignment.targetImage);
           if (!imageRecords.length || assignment.values.length !== imageRecords.length) {
             const message =
               "文字中的" + assignmentLabel(assignment) + "顺序值数量与图片人员行数不一致";
@@ -432,7 +621,9 @@
             imageRecords.forEach((record) => addRowIssue(record, message, assignment.field));
             return;
           }
-          imageRecords.forEach((record, index) => applyValue(record, assignment, assignment.values[index]));
+          imageRecords.forEach((record, index) =>
+            applyValue(record, assignment, assignment.values[index], warnings, core),
+          );
           return;
         }
 
@@ -445,16 +636,128 @@
           );
           return;
         }
-        targets.forEach((record) => applyValue(record, assignment, assignment.value));
+        // 行号为空被放宽成「整组」时必须说出来：套错范围比不套更贵，
+        // 用户至少要在提示里看到「这次是凭什么套上去的」。
+        if (
+          assignment.scope === "rows" &&
+          !assignment.targetRows.length &&
+          assignment.field !== "name"
+        ) {
+          pushUnique(
+            warnings,
+            "文字中的" + assignmentLabel(assignment) + "没有写明具体行号，已按" +
+              (assignment.targetImage ? "第 " + assignment.targetImage + " 张图" : "所有图片") +
+              "里的 " + targets.length + " 行整组套用，请核对范围",
+          );
+        }
+        targets.forEach((record) => applyValue(record, assignment, assignment.value, warnings, core));
       });
+  }
+
+  /** 同名合并时允许互相补齐的字段（name 是合并键，不在这里）。 */
+  const MERGEABLE_FIELDS = ["hospital", "dateRaw"];
+
+  /**
+   * 同名行合并：同一个人在多张图里各出现一次时，必须收敛成一行。
+   *
+   * 为什么必须在本地做：用户常同时给「聊天截图里那份残缺名单」和「一张完整名单」，
+   * 两张图里都有这个人。模型看不到另一张图里的同名人该怎么处理（也不该由它决定），
+   * 所以提示词要求它**逐图如实提取、绝不跨图去重**，去重与补齐在这里完成。
+   * 少了这一步，一次上传就会给同一个人发出两份证书 —— 静默的、发出去就收不回来的错。
+   *
+   * 规则（保守优先，绝不猜）：
+   *   - 姓名归一化后相同（去空格、忽略大小写）才可能是同一人；
+   *   - 只有一边有值的字段直接补过去 —— 这就是「用完整名单补全残缺名单」；
+   *   - 两边都有值且不同 → **不合并**：两行都留、都标成需处理，由用户判断是不是同一个人；
+   *   - 空姓名行永不参与合并（那本来就是缺项，合并只会把它藏起来）。
+   *
+   * 被并进来的 note 会一并继承，也就继承了「AI 存疑」标记 —— 宁可多让人看一眼，
+   * 也不能把一条本来存疑的信息在合并时悄悄洗白。
+   */
+  function mergeSameNameRows(records, warnings) {
+    const groups = new Map();
+    records.forEach((record) => {
+      const key = normalizedName(record.name);
+      if (!key) return;
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key).push(record);
+    });
+
+    const removed = new Set();
+    const mergedNames = [];
+    let filled = 0;
+
+    groups.forEach((group) => {
+      if (group.length < 2) return;
+      const keeper = group[0];
+      let mergedHere = false;
+      group.slice(1).forEach((donor) => {
+        const conflicts = MERGEABLE_FIELDS.map((field) => {
+          const left = clean(keeper[field]);
+          const right = clean(donor[field]);
+          return left && right && left !== right
+            ? assignmentLabel({ field: field }) + "「" + left + "」与「" + right + "」"
+            : "";
+        }).filter(Boolean);
+
+        if (conflicts.length) {
+          // 同名但值对不上：可能是同名两个人，也可能是同一人的两条矛盾来源。
+          // 这里不猜 —— 两条都保留并标红，用户删掉多余的那条就行。
+          const message =
+            "疑似重复：同名「" + keeper.name + "」在两处的值不一致（" + conflicts.join("，") +
+            "），两条都保留，请确认要哪一条";
+          addRowIssue(keeper, message);
+          addRowIssue(donor, message);
+          return;
+        }
+
+        MERGEABLE_FIELDS.forEach((field) => {
+          if (clean(keeper[field]) || !clean(donor[field])) return;
+          keeper[field] = donor[field];
+          if (donor.aiSources && donor.aiSources[field]) {
+            keeper.aiSources[field] = donor.aiSources[field];
+          }
+          filled += 1;
+        });
+        // 坐标并进来：合并之后，按行号下的赋值仍然要能找到这一行
+        (donor._imageRows || []).forEach((ref) => keeper._imageRows.push(ref));
+        if (donor.aiNote) {
+          keeper.aiNote = [keeper.aiNote, donor.aiNote].filter(Boolean).join("；");
+        }
+        removed.add(donor);
+        mergedHere = true;
+      });
+      if (mergedHere) mergedNames.push(keeper.name);
+    });
+
+    if (!mergedNames.length) return;
+
+    // 原地替换数组内容：调用方持有的是同一个引用（后面还要用 records）
+    const survivors = records.filter((record) => !removed.has(record));
+    records.length = 0;
+    survivors.forEach((record) => records.push(record));
+
+    const shown = mergedNames.slice(0, 6).join("、");
+    pushUnique(
+      warnings,
+      "同名行已合并 " + mergedNames.length + " 组（" + shown +
+        (mergedNames.length > 6 ? " 等 " + mergedNames.length + " 人" : "") + "）" +
+        (filled ? "，空缺字段由另一处补上 " + filled + " 处" : "") +
+        "；若其中确有同名不同人，请核对后再生成",
+    );
   }
 
   /**
    * 把模型提取出的独立事实按固定工作流合并。这里才是业务规则的唯一实现：
-   * 图片建立基础行；文字姓名补齐缺失人员；文字赋值按 global < ordered < rows < named
-   * 从低到高覆盖。同等作用范围出现不同值时不猜，转成行级冲突。
+   * 图片建立基础行；文字姓名补齐缺失人员；同名行收敛成一行；
+   * 文字赋值按 global < ordered < rows < named 从低到高覆盖。
+   * 同等作用范围出现不同值时不猜，转成行级冲突。
+   *
+   * @param {object} payload 模型返回的 json
+   * @param {object} [core] window.CertCore；只用来比较日期的精确程度。
+   *   不传时行为与以前一致（文字赋值一律覆盖），仍可独立调用。
    */
-  function mergeExtraction(payload) {
+  function mergeExtraction(payload, core) {
     const input = payload && typeof payload === "object" ? payload : {};
     const warnings = [];
     const hasWorkflowShape =
@@ -468,9 +771,18 @@
     }
 
     const imageRows = Array.isArray(input.imageRows) ? input.imageRows : [];
+    // 图内行号：模型没写 row 就按该图内的出现顺序补；没写 image 就当成第 1 张图
+    // （单图是绝大多数调用，这样旧响应不改也能命中按行号的赋值）。
+    const seenPerImage = {};
     const records = imageRows
       .filter((item) => item && typeof item === "object")
-      .map((item, index) => makeWorkflowRow(item, "image", index + 1));
+      .map((item, index) => {
+        const imageIndex = Number(item.image) > 0 ? Math.floor(Number(item.image)) : 1;
+        seenPerImage[imageIndex] = (seenPerImage[imageIndex] || 0) + 1;
+        const rowInImage =
+          Number(item.row) > 0 ? Math.floor(Number(item.row)) : seenPerImage[imageIndex];
+        return makeWorkflowRow(item, "image", index + 1, { image: imageIndex, row: rowInImage });
+      });
     const assignments = (Array.isArray(input.assignments) ? input.assignments : [])
       .map((item, index) => normalizeAssignment(item, index, warnings))
       .filter(Boolean);
@@ -495,9 +807,11 @@
     // 只动得到 rows 纠正的那些行 —— 旧名匹配不到任何记录时保持原样，交给后面的兜底分支。
     assignments.forEach((assignment) => {
       if (assignment.field !== "name" || assignment.scope !== "rows") return;
-      const corrected = findByImageRows(records, assignment.targetRows).filter(
-        (record) => record._imageName && record.name !== record._imageName,
-      );
+      const corrected = findByImageRows(
+        records,
+        assignment.targetRows,
+        assignment.targetImage,
+      ).filter((record) => record._imageName && record.name !== record._imageName);
       if (!corrected.length || !assignment.value) return;
       assignments.forEach((other) => {
         if (other === assignment) return;
@@ -534,7 +848,11 @@
       });
     });
 
-    applyAssignments(records, assignments, warnings, (assignment) => assignment.field !== "name");
+    // 同名行必须先收敛：否则「残缺名单 + 完整名单」两张图会让同一个人生成两份证书。
+    // 放在文字赋值之前，是因为合并会把被并行的图片坐标接过来，按行号的赋值才找得到人。
+    mergeSameNameRows(records, warnings);
+
+    applyAssignments(records, assignments, warnings, (assignment) => assignment.field !== "name", core);
 
     records.forEach((record) => {
       delete record._fieldRules;
@@ -562,7 +880,7 @@
    * @param {object} core window.CertCore（用它的 validateRecord）
    */
   function normalize(payload, core) {
-    const merged = mergeExtraction(payload);
+    const merged = mergeExtraction(payload, core);
     const raw = merged.records;
     const records = [];
 
@@ -617,7 +935,8 @@
    *
    * @param {object} options
    * @param {string} options.text 文本输入（可为空，只要给了图片）
-   * @param {{base64:string, mime:string, name:string}|null} options.image 图片（可选）
+   * @param {Array<{base64:string, mime:string, name:string}>} [options.images] 图片（0~4 张，按顺序编号）
+   * @param {{base64:string, mime:string, name:string}} [options.image] 单张图片（等价于 images: [image]）
    * @param {string} options.apiKey
    * @param {string} options.model
    * @param {string} [options.endpoint] 覆盖端点（用于"其它 OpenAI 兼容接口"）
@@ -627,17 +946,20 @@
    * @returns {Promise<{records:Array, unreadable:string, usage:object|null, raw:string}>}
    */
   async function extractRecords(options) {
-    const { text, image, apiKey, model, core, signal, onStage } = options;
+    const { text, apiKey, model, core, signal, onStage } = options;
+    const images = (
+      Array.isArray(options.images) ? options.images : [options.image]
+    ).filter(Boolean);
     const endpoint = options.endpoint || (getProvider("deepseek") || {}).endpoint;
 
     if (!endpoint) throw new Error("没有配置接口地址。");
     if (!apiKey) throw new Error("请先填写 API Key。");
     if (!model) throw new Error("请先填写模型名。");
-    if (!text && !image) throw new Error("没有可解析的内容：请填文本或选一张图片。");
+    if (!text && !images.length) throw new Error("没有可解析的内容：请填文本或选一张图片。");
 
-    const body = buildRequestBody({ text: text, image: image, model: model });
+    const body = buildRequestBody({ text: text, images: images, model: model });
 
-    if (onStage) onStage(image ? "正在识别图片…" : "正在解析文本…");
+    if (onStage) onStage(images.length ? "正在识别图片…" : "正在解析文本…");
 
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
@@ -708,7 +1030,7 @@
     const finishReason =
       payload.choices && payload.choices[0] && payload.choices[0].finish_reason;
     if (finishReason === "length") {
-      throw truncatedError(Boolean(image), body.max_tokens);
+      throw truncatedError(images.length > 0, body.max_tokens);
     }
 
     const jsonText = extractJsonText(payload);
@@ -732,7 +1054,7 @@
     };
   }
 
-  /** 把 File 读成 { base64, mime, name }，并在本地先做大小与格式检查。 */
+  /** 把 File 读成 { base64, mime, name, bytes }，并在本地先做大小与格式检查。 */
   function readImageFile(file, readAsDataUrl) {
     return new Promise((resolve, reject) => {
       if (!file) {
@@ -767,10 +1089,52 @@
             base64: String(dataUrl).slice(comma + 1),
             mime: file.type,
             name: file.name || "image",
+            // 合计体积闸门要用它。base64 会膨胀 4/3，不能拿字符串长度当体积。
+            bytes: Number(file.size) || 0,
           });
         })
         .catch(() => reject(new Error("图片读取失败。")));
     });
+  }
+
+  /**
+   * 往已有列表里追加图片：逐张做格式/体积检查，并卡住张数与合计体积。
+   *
+   * 一张坏图不该让整批失败，所以合法的都读进来，非法的逐条给出原因。
+   * 张数与体积是**先到先得**：超出的那几张直接不收，而不是把已有的挤掉。
+   *
+   * @returns {Promise<{images:Array, errors:string[]}>}
+   */
+  async function addImageFiles(existing, files, readAsDataUrl) {
+    const images = Array.isArray(existing) ? existing.slice() : [];
+    const errors = [];
+    const list = Array.prototype.slice.call(files || []);
+    let total = images.reduce((sum, image) => sum + (Number(image.bytes) || 0), 0);
+
+    for (const file of list) {
+      if (images.length >= MAX_IMAGES) {
+        errors.push("最多一次解析 " + MAX_IMAGES + " 张图片，后面的没有加入。");
+        break;
+      }
+      let image;
+      try {
+        image = await readImageFile(file, readAsDataUrl);
+      } catch (error) {
+        errors.push((file && file.name ? file.name + "：" : "") + error.message);
+        continue;
+      }
+      if (total + image.bytes > MAX_TOTAL_IMAGE_BYTES) {
+        errors.push(
+          (image.name ? image.name + "：" : "") + "这几张图片合计超过 " +
+            Math.round(MAX_TOTAL_IMAGE_BYTES / 1024 / 1024) + " MB，请压缩后再试。",
+        );
+        break;
+      }
+      total += image.bytes;
+      images.push(image);
+    }
+
+    return { images: images, errors: errors };
   }
 
   return {
@@ -778,6 +1142,8 @@
     FIELDS: FIELDS,
     PROMPT: PROMPT,
     MAX_IMAGE_BYTES: MAX_IMAGE_BYTES,
+    MAX_IMAGES: MAX_IMAGES,
+    MAX_TOTAL_IMAGE_BYTES: MAX_TOTAL_IMAGE_BYTES,
     MAX_OUTPUT_TOKENS: MAX_OUTPUT_TOKENS,
     ALLOWED_IMAGE_TYPES: ALLOWED_IMAGE_TYPES,
     getProvider: getProvider,
@@ -789,5 +1155,6 @@
     normalize: normalize,
     extractRecords: extractRecords,
     readImageFile: readImageFile,
+    addImageFiles: addImageFiles,
   };
 });

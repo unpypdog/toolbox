@@ -42,13 +42,14 @@ toolbox/
     ├── test_te_cert_generator_core.js    # 证书工具核心逻辑（纯 Node）
     ├── test_te_cert_direct_pdf.js        # 本地直接 PDF 逻辑
     ├── test_te_cert_direct_pdf_browser.py # 真实 Chromium 生成测试
+    ├── test_te_cert_ai_images_browser.py # 真实 Chromium 多图输入测试
     ├── lint_te_cert_generator.js         # 证书工具接线检查（纯 Node）
     └── test_te_cert_dom_smoke.js         # 证书工具 DOM 冒烟（最小 DOM 桩）
 ```
 
-### te-cert-generator 的十二条硬约束
+### te-cert-generator 的十四条硬约束
 
-改这个工具前先读这十二条，都是踩过的坑：
+改这个工具前先读这十四条，都是踩过的坑：
 
 1. **模板改了必须重跑载荷**：`node tools/te-cert-generator/build-templates.js`。
    `file://` 下 Chromium 拒绝 fetch 同目录的 docx，模板只能靠 base64 载荷用
@@ -168,6 +169,57 @@ toolbox/
     同时删掉的还有 `cert-merge.js`（为"逐份转换后再前端合并"准备，而合批现在由
     pdf-lib 逐页 `addPage` 原生支持）。
     反向断言在 `test_te_cert_generator_core.js` 的 `[6]` 节与 `lint_te_cert_generator.js` 的 `[2]` 节。
+
+13. **图片不等于名单表格；日期允许缺段**。这两条是同一次改进的两面，都是真实素材逼出来的：
+    - 用户最自然的用法是把**整张聊天记录截图**丢进来（指令全在图里）。旧版对「只有图片」的输入
+      在 user 消息里写着「textPeople 和 assignments 必须为空」，于是医院、日期、后补的姓名
+      全被丢掉，表格里只剩姓名 —— 现象像"AI 读不出信息"，其实**是提示词禁止它读**。
+      现在聊天记录里被转发的名单图、单独发出的姓名清单、关于医院/日期的说明都按同一套契约
+      提取（`imageRows`/`textPeople`/`assignments`），作用范围仍由 `mergeExtraction` 判定。
+      **不许把这条限制加回来**。
+    - 素材常常只有年月（「那张图片里的名单写〈年份〉年〈月份〉月份左右」，「日」根本不存在）。
+      `parseDate` 仍是严格契约（缺段抛错，调用方都要完整日期），但 `validateRecord` 走
+      `parseDateParts`：读到年月就原样留在 `dateRaw` 里（表格直接显示给人补）、报
+      「日期不完整：只读到 ×× 年 ×× 月，请补「日」」、`date` 保持 null、状态仍是 invalid。
+      生成闸门只看 `status === "ready"`，所以缺日的记录永远进不了 PDF —— 这条链不能松。
+      把契约改回「date 统一为 YYYY-MM-DD」等于逼模型编一个「日」，那是**静默印错证书**。
+    护栏在 `test_te_cert_generator_core.js`：`[2]` 节断言缺段/ garbage 的分界（「10」不许被读成
+    2010 年）、`[4]` 节有一张完整聊天记录截图的端到端场景（11 行、医院全局、7 行缺日、
+    4 行月份归属不明，全部拦下且不殃及整批）。
+
+14. **一次可以给多张图；同一个人只能落成一条记录**。这两条是同一次改进的两面：
+    - 页面（`aiImageInput` 的 `multiple`）与请求（`images: [...]`，最多 `MAX_IMAGES` 张）
+      都支持多图。模型按上传顺序把它们编号 1..N，每行带 `image`、赋值可带 `targetImage`。
+      **行号是「图内行号」**：第 2 张图的第 1 行 ≠ 第 1 张图的第 1 行，所以匹配一律看
+      `{image,row}` 整个坐标（`findByImageRows`），只看行号就会张冠李戴。
+      读文件时注意：`input.value = ""` 会把 `files` 这个**活的** FileList 当场清空，
+      必须先拷成数组 —— `test_te_cert_ai_images_browser.py` 就是为这类只在真浏览器里
+      才暴露的问题存在的（CLAUDE 里记着：桩测不出「选了没反应」）。
+    - 提示词要求模型**逐图如实提取、绝不跨图去重**（去重是业务决定，不是提取），
+      去重与补齐在 `mergeSameNameRows()`：同名同人 → 补空合一行；同名但值冲突 →
+      两条都留并标「疑似重复」。少了它，用户给「聊天截图 + 一张完整名单」就会拿到
+      同一个人的两份证书 —— 发出去就收不回来。
+    - 相邻的一条：文字日期比图上更粗（只到年月或年）且与图上**同月/同年**时不覆盖，
+      保留更精确的那条（`keepsMorePreciseDate`）。否则用户刚补进来的完整名单，
+      会被聊天里那句「〈年〉年〈月〉月份左右」打回不完整，还得再填一遍。
+      文字说了别的月份/年份照常覆盖 —— 那是改写指令，不是回忆。
+    - **`scope:"rows"` 不写行号 = 整组**（`rowsTargets`）：写了 `targetImage` 就是那张图的
+      全部行，连图号都没写就是所有图片里的人。实测踩过：模型把「那张图片里的名单」理解成
+      整张图、`targetRows` 留空，旧实现只认行号 → 赋值找不到目标 → **一整列日期全空**，
+      而提示只有一句「找不到目标：rows」，用户完全不知道该改什么。放宽时必须回一条
+      「没写行号，已按第 N 张图的 M 行整组套用」，套错范围比不套更贵。
+      **姓名纠正绝不放宽** —— 那条一旦放宽就是把整批人改成同一个名字。
+    - **没收窄的 `ambiguous` 只按证据强弱收窄一次**（`ambiguousTargets`）：同一字段上先看
+      有没有点名到人的赋值，再看有没有按行的赋值，都没有才退回整批。实测：聊天先给图片里
+      那批人定了日期、又对另外几个点名的人改了口，那条没写目标的 ambiguous 把 19 个
+      与它无关的人一起标红，整批都生成不了（和约束 11 是同一类事故）。
+    - **「某列没解析出来」必须有出口**：AI 面板的「查看 AI 原始返回」（`renderAiRaw`）
+      摊开模型返回的 json 原文 + 本地工作流的处理说明；整列全空时提示条还要直说
+      「材料里没有就不会替你编」（`missingFieldHints`）。没有这个出口，「模型没给」
+      和「给了没落地」长得一模一样，而这两种的修法完全相反 —— 真实排查就卡在这里。
+    护栏在 `test_te_cert_generator_core.js` 的 `[4]` 节（合并 / 冲突 / 图内行号定位 /
+    更粗日期不覆盖 / 张数与体积闸门 / **DeepSeek 真实返回的整段回归**），
+    接线检查在 `lint_te_cert_generator.js`，真实浏览器路径在 `test_te_cert_ai_images_browser.py`。
 
 
 ### te-cert-generator 参考资料：字体与姓名框几何

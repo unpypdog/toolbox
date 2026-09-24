@@ -98,10 +98,23 @@
 
             <p class="panel-note">
               <b>文本和图片可以一起用，而且常用组合是</b>：
-              图片可以只有姓名，也可以每行都有姓名、医院和日期。AI 只负责分别提取图片事实、
-              文字中的人员和字段作用范围；随后由本机代码按固定规则完成匹配与覆盖。文本明确指定
-              的值优先，未涉及的图片字段会保留；多个日期或医院对应不清时会标成「需处理」，
-              不会任选一个覆盖所有人。
+              图片可以只有姓名，也可以每行都有姓名、医院和日期。
+              <b>微信聊天记录截图可以直接丢进来</b>：转发在里面的名单图、单独发出的姓名清单、
+              以及「医院换成××」「日期写××」这类说明都会被分开读出来。
+              AI 只负责分别提取图片事实、文字中的人员和字段作用范围；随后由本机代码按固定规则
+              完成匹配与覆盖。文本明确指定的值优先，未涉及的图片字段会保留；多个日期或医院
+              对应不清时会标成「需处理」，不会任选一个覆盖所有人。
+            </p>
+
+            <p class="panel-note">
+              <b>素材只写到年月也没关系</b>：日期会按读到的部分填进表格并标「日期不完整」，
+              你补上「日」即可 —— 缺的那一段宁可空着，也不会由 AI 编一个出来。
+            </p>
+
+            <p class="panel-note">
+              <b>可以给多张图（最多 4 张）</b>：例如「聊天截图 + 一张完整名单」。
+              同一个人在多张图里都出现时按姓名合并成一行，空缺的医院/日期由另一张补上；
+              两张图的值互相矛盾时不猜，两条都留并标「疑似重复」让你确认。
             </p>
 
             <label class="field-label" for="aiProvider">解析服务</label>
@@ -111,26 +124,32 @@
             <p id="aiHelp" class="service-help"></p>
 
             <label class="field-label" for="aiImageInput">
-              图片（可选，与上面的输入框一起解析）
+              图片（可选，可多张，与上面的输入框一起解析）
             </label>
             <label id="aiImageLabel" class="drop-zone drop-zone--compact" for="aiImageInput" tabindex="0">
-              <input id="aiImageInput" type="file" accept="image/jpeg,image/png,image/gif,image/webp" />
-              <strong>选择或拖入名单图片</strong>
-              <span>支持 JPEG / PNG / GIF / WebP，单张不超过 12 MB。只选图片不填文本也可以。</span>
+              <input id="aiImageInput" type="file" accept="image/jpeg,image/png,image/gif,image/webp" multiple />
+              <strong>选择或拖入名单图片 / 聊天记录截图</strong>
+              <span>支持 JPEG / PNG / GIF / WebP，单张不超过 12 MB、最多 4 张。只选图片不填文本也可以。</span>
             </label>
             <div id="aiImageSummary" class="file-summary is-empty" aria-live="polite">
               <span id="aiImageName">尚未选择图片</span>
               <span id="aiImageMeta"></span>
             </div>
+            <ul id="aiImageList" class="image-list"></ul>
 
             <div class="action-row">
               <button id="aiParseBtn" class="button button--secondary button--small" type="button" disabled>
                 AI 解析
               </button>
               <button id="aiClearImageBtn" class="button button--ghost button--small" type="button" disabled>
-                移除图片
+                移除全部图片
               </button>
             </div>
+
+            <details id="aiRawBlock" class="raw-block" hidden>
+              <summary>查看 AI 原始返回（某列没解析出来时先看这里）</summary>
+              <pre id="aiRawOutput" class="raw-output"></pre>
+            </details>
 
             <p id="aiNote" class="service-note">
               默认不联网。选了服务并填好密钥后才会把名单内容（或图片）发给该服务。

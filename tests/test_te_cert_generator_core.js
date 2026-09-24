@@ -204,6 +204,53 @@ function testDate() {
     threw = true;
   }
   check("空日期抛错", threw);
+
+  // ---- 只有年月 / 只有年：读到的那部分必须留住，缺的那部分绝不许编 ----
+  // 真实素材：聊天记录写「那张图片里的名单写〈年份〉年〈月份〉月份左右」，
+  // 「日」根本不存在。旧实现一律抛「格式无法识别」，模型只能丢掉日期或自己编一个日。
+  console.log("  --- 不完整日期：读到的留住、缺的留给用户补 ---");
+  const partial = core.validateRecord({ name: "甲", hospital: "乙医院", dateRaw: "2022-10" });
+  equal("只有年月的记录仍是需处理", partial.status, "invalid");
+  equal("原始年月原样保留在 dateRaw 里（表格直接显示给人补）", partial.dateRaw, "2022-10");
+  equal("不完整日期不产出 date 对象（生成路径拿不到它就印不出错证书）", partial.date, null);
+  check(
+    "原因写明「日期不完整」而不是「格式无法识别」",
+    /日期不完整/.test(partial.issues.join("")) && /「日」/.test(partial.issues.join("")),
+    partial.issues.join(" | "),
+  );
+  check("提示里带上已读到的年月", /2022\s*年\s*10\s*月/.test(partial.issues.join("")), partial.issues.join(""));
+
+  const cnPartial = core.validateRecord({ name: "甲", hospital: "乙医院", dateRaw: "22年10月" });
+  check(
+    "中文写法「22年10月」同样只算不完整，不是格式错误",
+    /日期不完整/.test(cnPartial.issues.join("")),
+    cnPartial.issues.join(" | "),
+  );
+
+  const yearOnly = core.validateRecord({ name: "甲", hospital: "乙医院", dateRaw: "2022" });
+  check(
+    "只有年份时提示补「月」「日」",
+    /日期不完整/.test(yearOnly.issues.join("")) && /「月」「日」/.test(yearOnly.issues.join("")),
+    yearOnly.issues.join(" | "),
+  );
+
+  const strayNumber = core.validateRecord({ name: "甲", hospital: "乙医院", dateRaw: "10" });
+  check(
+    "日期格里的「10」仍是格式错误（绝不会被读成 2010 年）",
+    /格式无法识别/.test(strayNumber.issues.join("")),
+    strayNumber.issues.join(" | "),
+  );
+
+  let strictThrew = false;
+  try {
+    core.parseDate("2022-10");
+  } catch {
+    strictThrew = true;
+  }
+  check("parseDate 仍是严格契约（缺日抛错），不完整日期只走 validateRecord", strictThrew);
+  equal("parseDateParts 只读到年月时 complete=false", core.parseDateParts("2022-10").complete, false);
+  equal("parseDateParts 年月日齐全时 complete=true", core.parseDateParts("2022-10-20").complete, true);
+  equal("中文「号」也能解析（日期正则本来就允许号）", core.parseDate("2025年1月1号").day, "01");
 }
 
 /* ----------------------------------------------------------- 3. 文件命名 */
@@ -639,6 +686,432 @@ async function testAiExtraction() {
   );
   equal("assignments 提示词不再要求用 note 表达不确定", /写进对应 note/.test(ai.PROMPT), false);
 
+  // ---- 真实素材：聊天记录截图，不是名单表格 ----
+  // 一张图里同时有：被转发进来的名单图（7 人）、单独发出的姓名清单（4 人）、
+  // 关于医院的说明（南京鼓楼医院）、关于日期的分组说明（图片那批 22 年 10 月、
+  // 后给的 4 个名字 26 年 1 月或 2 月），以及 3 条读不到内容的语音。
+  // 旧提示词对「只有图片」的输入要求 assignments 必须为空，这张图就只出得来 7 个姓名。
+  const CHAT_IMAGE = {
+    imageRows: [
+      { row: 1, name: "熊亚莉", evidence: "熊亚莉" },
+      { row: 2, name: "姚仁玲", evidence: "姚仁玲" },
+      { row: 3, name: "夏娟", evidence: "夏娟" },
+      { row: 4, name: "张帆", evidence: "张帆" },
+      { row: 5, name: "黄睿", evidence: "黄睿" },
+      { row: 6, name: "贾蓓", evidence: "贾蓓" },
+      { row: 7, name: "王健", evidence: "王健" },
+    ],
+    textPeople: [
+      { name: "靳睿", evidence: "靳睿、耿楠、芮法娟、倪文婧" },
+      { name: "耿楠", evidence: "靳睿、耿楠、芮法娟、倪文婧" },
+      { name: "芮法娟", evidence: "靳睿、耿楠、芮法娟、倪文婧" },
+      { name: "倪文婧", evidence: "靳睿、耿楠、芮法娟、倪文婧" },
+    ],
+    assignments: [
+      { field: "hospital", value: "南京鼓楼医院", scope: "global", evidence: "南京鼓楼医院" },
+      {
+        field: "date",
+        value: "2022-10",
+        scope: "rows",
+        targetRows: [1, 2, 3, 4, 5, 6, 7],
+        evidence: "那张图片里的名单写 22 年 10 月份左右吧",
+      },
+      {
+        field: "date",
+        values: ["2026-01", "2026-02"],
+        scope: "ambiguous",
+        targetNames: ["靳睿", "耿楠", "芮法娟", "倪文婧"],
+        evidence: "26 年的 1 月份 2 月份吧",
+      },
+    ],
+    unreadable: "3 条语音消息未转文字，内容不可读",
+  };
+  const chat = ai.normalize(CHAT_IMAGE, core);
+  equal("聊天记录里两种来源的人员都建了行（图片 7 + 文字 4）", chat.records.length, 11);
+  check(
+    "医院从聊天文字里读到并填到每一行",
+    chat.records.every((record) => record.hospital === "南京鼓楼医院"),
+    JSON.stringify(chat.records.map((record) => record.hospital)),
+  );
+  check(
+    "图片里那批拿到 22 年 10 月（年月留住、只缺「日」）",
+    chat.records.slice(0, 7).every(
+      (record) => record.dateRaw === "2022-10" && /日期不完整/.test(record.issues.join("")),
+    ),
+    JSON.stringify(chat.records.slice(0, 7).map((record) => record.issues)),
+  );
+  check(
+    "后给的 4 个人没有被图片日期覆盖，也没有被编一个月份",
+    chat.records.slice(7).every((record) => record.dateRaw === ""),
+    JSON.stringify(chat.records.slice(7).map((record) => record.dateRaw)),
+  );
+  check(
+    "月份分不清归属时只标记这 4 个人，不殃及整批",
+    chat.records.slice(7).every((record) => /无法确定对应关系/.test(record.issues.join(""))) &&
+      chat.records.slice(0, 7).every((record) => !/无法确定对应关系/.test(record.issues.join(""))),
+    JSON.stringify(chat.records.map((record) => record.issues)),
+  );
+  check(
+    "11 条全部拦下（缺日的记录绝不静默放行生成）",
+    chat.records.every((record) => record.status === "invalid" && record.selected === false),
+    JSON.stringify(chat.records.map((record) => record.status)),
+  );
+  equal("读不到的语音条原样上报", chat.unreadable, "3 条语音消息未转文字，内容不可读");
+
+  // ---- 两张图：聊天截图里那份残缺名单 + 一张完整名单 ----
+  // 真实用法：截图里的人数不全（或者只有姓名），再补一张完整名单让 AI 一起看。
+  // 最大的风险是**同一个人被两张图各写一行 → 生成两份证书**，所以同一个人必须收敛成一行。
+  console.log("  --- 多张图：同一个人只能有一条记录 ---");
+  const twoImages = ai.normalize(
+    {
+      imageRows: [
+        { image: 1, row: 1, name: "熊亚莉" },
+        { image: 1, row: 2, name: "姚仁玲" },
+        { image: 1, row: 3, name: "夏娟" },
+        { image: 2, row: 1, name: "熊亚莉", hospital: "南京鼓楼医院", date: "2022-10-20" },
+        { image: 2, row: 2, name: "姚仁玲", hospital: "南京鼓楼医院", date: "2022-10-20" },
+        { image: 2, row: 3, name: "夏娟", hospital: "南京鼓楼医院", date: "2022-10-20" },
+        { image: 2, row: 4, name: "张帆", hospital: "南京鼓楼医院", date: "2022-10-20" },
+      ],
+      textPeople: [],
+      assignments: [],
+      unreadable: "",
+    },
+    core,
+  );
+  equal("两张图重复的人只留一条（3 + 4 → 4 条，不是 7 条）", twoImages.records.length, 4);
+  check(
+    "残缺名单由完整名单补齐，且补完就是可生成状态",
+    twoImages.records.every(
+      (record) =>
+        record.status === "ready" &&
+        record.hospital === "南京鼓楼医院" &&
+        record.dateRaw === "2022-10-20",
+    ),
+    JSON.stringify(twoImages.records.map((record) => [record.name, record.hospital, record.dateRaw, record.status])),
+  );
+  check(
+    "合并这件事本身要说明（不能静默把人并掉）",
+    twoImages.warnings.some((warning) => /同名行已合并/.test(warning) && /空缺字段/.test(warning)),
+    JSON.stringify(twoImages.warnings),
+  );
+
+  // 同名但值对不上：可能是同名两个人，也可能是同一人的两条矛盾来源 —— 一律不猜
+  const sameNameConflict = ai.normalize(
+    {
+      imageRows: [
+        { image: 1, row: 1, name: "熊亚莉", hospital: "甲医院", date: "2022-10-20" },
+        { image: 2, row: 1, name: "熊亚莉", hospital: "乙医院", date: "2022-10-20" },
+      ],
+      textPeople: [],
+      assignments: [],
+      unreadable: "",
+    },
+    core,
+  );
+  equal("同名但医院对不上时不合并，两条都留", sameNameConflict.records.length, 2);
+  check(
+    "两条都进「需处理」并写明是疑似重复",
+    sameNameConflict.records.every(
+      (record) => record.status === "invalid" && /疑似重复/.test(record.issues.join("")),
+    ),
+    JSON.stringify(sameNameConflict.records.map((record) => record.issues)),
+  );
+  check(
+    "矛盾的两条都不会被自己的冲突说明洗掉原值",
+    sameNameConflict.records.map((record) => record.hospital).join("|") === "甲医院|乙医院",
+  );
+
+  // 同名合并后，按行号下的赋值仍要能找到合并进来的那一行
+  const mergedTargeting = ai.normalize(
+    {
+      imageRows: [
+        { image: 1, row: 1, name: "甲" },
+        { image: 2, row: 1, name: "甲", hospital: "甲医院" },
+      ],
+      textPeople: [],
+      assignments: [
+        { field: "date", value: "2026-05-06", scope: "rows", targetImage: 2, targetRows: [1] },
+      ],
+      unreadable: "",
+    },
+    core,
+  );
+  equal("合并后仍能被「第 2 张图第 1 行」的赋值命中", mergedTargeting.records.length, 1);
+  equal("命中后值写到了合并后的那一行", mergedTargeting.records[0].dateRaw, "2026-05-06");
+
+  // ---- 多图的行号定位：第 2 张图的第 1 行 ≠ 第 1 张图的第 1 行 ----
+  const perImageTargeting = ai.normalize(
+    {
+      imageRows: [
+        { image: 1, row: 1, name: "甲", hospital: "甲医院" },
+        { image: 1, row: 2, name: "乙", hospital: "甲医院" },
+        { image: 2, row: 1, name: "丙", hospital: "甲医院" },
+        { image: 2, row: 2, name: "丁", hospital: "甲医院" },
+      ],
+      textPeople: [],
+      assignments: [
+        { field: "date", value: "2026-01-01", scope: "rows", targetImage: 2, targetRows: [1, 2] },
+      ],
+      unreadable: "",
+    },
+    core,
+  );
+  check(
+    "带 targetImage 时只命中那张图的行",
+    perImageTargeting.records.map((record) => record.dateRaw).join("|") === "||2026-01-01|2026-01-01",
+    perImageTargeting.records.map((record) => record.dateRaw).join("|"),
+  );
+
+  // ---- 文字日期比图上更粗时，不许把精确日期打回不完整 ----
+  // 用户补一张完整名单，正是为了把「日」补上；聊天里那句「〈年〉年〈月〉月份左右」
+  // 只是同一个月的模糊回忆。用它覆盖等于把刚补齐的信息又抹掉，还得再填一遍。
+  const vagueDateSource = {
+    imageRows: [
+      { image: 1, row: 1, name: "甲" },
+      { image: 2, row: 1, name: "甲", hospital: "甲医院", date: "2022-10-20" },
+    ],
+    textPeople: [],
+    unreadable: "",
+  };
+  const vagueDate = ai.normalize(
+    {
+      imageRows: vagueDateSource.imageRows,
+      textPeople: [],
+      assignments: [{ field: "date", value: "2022-10", scope: "rows", targetImage: 1, targetRows: [1] }],
+      unreadable: "",
+    },
+    core,
+  );
+  equal("更粗的文字日期不覆盖同月的精确日期", vagueDate.records[0].dateRaw, "2022-10-20");
+  check(
+    "这件事要说出来，不能静默忽略",
+    vagueDate.warnings.some((warning) => /没有覆盖更精确的/.test(warning)),
+    JSON.stringify(vagueDate.warnings),
+  );
+  equal("保留精确日期后这条可直接生成", vagueDate.records[0].status, "ready");
+  equal(
+    "文字只到年、图上更精确时不覆盖",
+    ai.normalize(
+      {
+        imageRows: vagueDateSource.imageRows,
+        textPeople: [],
+        assignments: [{ field: "date", value: "2022", scope: "rows", targetImage: 1, targetRows: [1] }],
+        unreadable: "",
+      },
+      core,
+    ).records[0].dateRaw,
+    "2022-10-20",
+  );
+  equal(
+    "文字说的是别的月份时照常覆盖（那是改写指令，不是回忆）",
+    ai.normalize(
+      {
+        imageRows: vagueDateSource.imageRows,
+        textPeople: [],
+        assignments: [{ field: "date", value: "2022-11", scope: "rows", targetImage: 1, targetRows: [1] }],
+        unreadable: "",
+      },
+      core,
+    ).records[0].dateRaw,
+    "2022-11",
+  );
+
+  // ---- DeepSeek 真实返回（用户实测原文，只省掉赘余的空字段）----
+  // 现象：医院全填上了，日期一整列「点击填写」。根因是那条 rows 赋值**没写行号**：
+  // 模型眼里「那张图片里的名单」就是整张图，不需要逐行点名，而旧实现只认行号，
+  // 于是赋值找不到目标 —— 提示里只有一句「找不到目标：rows」，用户根本不知道该干什么。
+  const REAL_IMAGE_1 = ["陈重", "严晓敏", "张昭萍", "张勇扬", "吴卫华", "李婕", "熊亚莉",
+    "姚仁玲", "夏娟", "张帆", "黄睿", "贾蓓", "王健", "王贵阳", "姚可方", "杨玥", "田安然",
+    "李惠惠", "刘嘉城"];
+  const REAL_IMAGE_2 = ["熊亚莉", "姚仁玲", "夏娟", "张帆", "黄睿", "贾蓓", "王健"];
+  const realPayload = {
+    imageRows: REAL_IMAGE_1.map((name, index) => ({ image: 1, row: index + 1, name: name })).concat(
+      REAL_IMAGE_2.map((name, index) => ({ image: 2, row: index + 1, name: name })),
+    ),
+    textPeople: ["靳睿", "耿楠", "芮法娟", "倪文婧"].map((name) => ({
+      name: name,
+      evidence: "靳睿、耿楠、芮法娟、倪文婧",
+    })),
+    assignments: [
+      { field: "hospital", value: "南京鼓楼医院", scope: "global", evidence: "南京鼓楼医院" },
+      { field: "date", value: "2022-10", scope: "rows", targetImage: 1, targetRows: [],
+        evidence: "那张图片里的名单写 22 年 10 月份左右吧" },
+      { field: "date", value: "2025", scope: "named", targetImage: 0,
+        targetNames: ["靳睿", "耿楠", "芮法娟", "倪文婧"], evidence: "然后后面几个给你的名字写 25 年" },
+      { field: "date", value: "2026-01", scope: "ambiguous", targetImage: 0, targetNames: [],
+        targetRows: [], evidence: "26 年的 1 月份 2 月份吧" },
+    ],
+    unreadable: "",
+  };
+  const realRun = ai.normalize(realPayload, core);
+  equal("真实返回：两张图的 26 行按姓名合并成 19 行，再加 4 个文字点名的人", realRun.records.length, 23);
+  check(
+    "真实返回：医院全局赋值落到每一行（当时用户看到的就是这一列好的）",
+    realRun.records.every((record) => record.hospital === "南京鼓楼医院"),
+  );
+  check(
+    "真实返回：没写行号的「图片那批」按整张图套用（这正是日期整列为空的根因）",
+    realRun.records.slice(0, 19).every((record) => record.dateRaw === "2022-10"),
+    JSON.stringify(realRun.records.map((record) => record.dateRaw)),
+  );
+  check(
+    "真实返回：4 个文字点名的人拿到的是被推翻的 25 年，且被标成待确认",
+    realRun.records.slice(19).every(
+      (record) => record.dateRaw === "2025" && /无法确定对应关系/.test(record.issues.join("")),
+    ),
+    JSON.stringify(realRun.records.slice(19).map((record) => [record.dateRaw, record.issues])),
+  );
+  check(
+    "真实返回：提示里说清「没写行号，按第 1 张图的 19 行整组套用」",
+    realRun.warnings.some((warning) => /没有写明具体行号/.test(warning) && /19 行/.test(warning)),
+    JSON.stringify(realRun.warnings),
+  );
+  check(
+    "真实返回：那条没写目标的 ambiguous 只落在被点名的 4 个人身上，不殃及 19 个无关的人",
+    realRun.records.slice(0, 19).every((record) => !/无法确定对应关系/.test(record.issues.join(""))) &&
+      realRun.records.slice(19).every((record) => /无法确定对应关系/.test(record.issues.join(""))),
+    JSON.stringify(realRun.records.map((record) => record.issues)),
+  );
+  check(
+    "真实返回：一条都不能直接生成（日期全都缺「日」，闸门照旧拦住）",
+    realRun.records.every((record) => record.status === "invalid"),
+  );
+
+  // ---- 「没写行号」的放宽只给医院和日期，姓名纠正绝不放宽 ----
+  const nameWidening = ai.normalize(
+    {
+      imageRows: [
+        { image: 1, row: 1, name: "甲" },
+        { image: 1, row: 2, name: "乙" },
+      ],
+      textPeople: [],
+      assignments: [{ field: "name", value: "丙", scope: "rows", targetImage: 1, targetRows: [] }],
+      unreadable: "",
+    },
+    core,
+  );
+  check(
+    "姓名纠正没写行号时绝不放宽成整批改名",
+    nameWidening.records.map((record) => record.name).join("|") === "甲|乙",
+    nameWidening.records.map((record) => record.name).join("|"),
+  );
+  check(
+    "拒绝放宽会给出说明",
+    nameWidening.warnings.some((warning) => /找不到目标/.test(warning)),
+    JSON.stringify(nameWidening.warnings),
+  );
+  const allImagesWidening = ai.normalize(
+    {
+      imageRows: [
+        { image: 1, row: 1, name: "甲" },
+        { image: 2, row: 1, name: "乙" },
+      ],
+      textPeople: [{ name: "丙" }],
+      assignments: [{ field: "date", value: "2026-03-04", scope: "rows", targetImage: 0, targetRows: [] }],
+      unreadable: "",
+    },
+    core,
+  );
+  check(
+    "连图号都没写时按「所有图片里的人」套用，且不碰纯文字的人",
+    allImagesWidening.records.slice(0, 2).every((record) => record.dateRaw === "2026-03-04") &&
+      allImagesWidening.records[2].dateRaw === "",
+    JSON.stringify(allImagesWidening.records.map((record) => record.dateRaw)),
+  );
+
+  // ---- 没写目标的 ambiguous 要收窄，不能把整批标红 ----
+  const narrowed = ai.normalize(
+    {
+      imageRows: [1, 2, 3, 4].map((index) => ({
+        image: 1,
+        row: index,
+        name: "人" + index,
+        hospital: "甲医院",
+        date: "2022-10-20",
+      })),
+      textPeople: [],
+      assignments: [
+        { field: "date", value: "2026-01-01", scope: "named", targetNames: ["人1", "人2"] },
+        { field: "date", value: "2026-02", scope: "ambiguous", targetNames: [], targetRows: [] },
+      ],
+      unreadable: "",
+    },
+    core,
+  );
+  check(
+    "没写目标的 ambiguous 收窄到同字段已点名的行，不殃及整批",
+    narrowed.records.slice(0, 2).every((record) => /无法确定对应关系/.test(record.issues.join(""))) &&
+      narrowed.records.slice(2).every((record) => !/无法确定对应关系/.test(record.issues.join(""))),
+    JSON.stringify(narrowed.records.map((record) => record.issues)),
+  );
+
+  // ---- 请求形状：多张图按上传顺序排进 user 消息 ----
+  const secondImage = { base64: "BBBB", mime: "image/png", name: "y.png" };
+  const twoImageBody = ai.buildRequestBody({
+    text: "",
+    images: [image, secondImage],
+    model: "m",
+  });
+  const twoImageParts = twoImageBody.messages[1].content;
+  equal("两张图 = 1 个 text 块 + 2 个 image 块", twoImageParts.length, 3);
+  check(
+    "图片顺序与上传顺序一致",
+    twoImageParts[1].image_url.url.indexOf("AAAA") >= 0 &&
+      twoImageParts[2].image_url.url.indexOf("BBBB") >= 0,
+    twoImageParts.map((part) => part.type).join(","),
+  );
+  check(
+    "user 消息里说明了张数与编号规则",
+    /编号 1 到 2/.test(twoImageParts[0].text),
+    twoImageParts[0].text,
+  );
+  equal(
+    "单张 image 的老调用方式仍然可用（既有集成不受影响）",
+    ai.buildRequestBody({ text: "", image: image, model: "m" }).messages[1].content.length,
+    2,
+  );
+  equal("没有图片时 content 仍是纯字符串", typeof textBody.messages[1].content, "string");
+
+  // ---- 提示词必须禁止模型跨图去重（去重是本地工作流的事）----
+  check(
+    "提示词要求逐图提取、绝不跨图去重",
+    /绝不跨图去重/.test(ai.PROMPT) && /每张图各自逐行提取/.test(ai.PROMPT),
+  );
+  check(
+    "提示词里的行要带 image 编号、赋值可带 targetImage",
+    /"image":1/.test(ai.PROMPT) && /"targetImage"/.test(ai.PROMPT),
+  );
+
+  // ---- 提示词安全：图片里的文字说明同样要读，但不许模型自己合并 ----
+  const imageOnlyBody = ai.buildRequestBody({ text: "", image: image, model: "m" });
+  const imageOnlyText = (
+    imageOnlyBody.messages[1].content.find((part) => part.type === "text") || {}
+  ).text || "";
+  equal(
+    "只有图片输入时不再禁止 textPeople / assignments（聊天记录正走这条路径）",
+    /必须为空/.test(imageOnlyText),
+    false,
+  );
+  check(
+    "只有图片时说明「图片里的文字」也是材料",
+    /聊天记录/.test(imageOnlyText) && /(文字赋值|assignments)/.test(imageOnlyText),
+    imageOnlyText,
+  );
+  check("提示词把聊天记录/便签列为图片形态", /聊天记录/.test(ai.PROMPT) && /便签/.test(ai.PROMPT));
+  check(
+    "提示词禁止把聊天抬头/群名/昵称里的姓名当人员",
+    /抬头|群名|昵称/.test(ai.PROMPT),
+  );
+  check(
+    "提示词要求日期缺段就少写、绝不补齐",
+    /绝不补/.test(ai.PROMPT) && /YYYY-MM/.test(ai.PROMPT),
+  );
+  check(
+    "提示词说明 ambiguous 可以带 targetNames（只标记那几个人）",
+    /ambiguous/.test(ai.PROMPT) && /targetNames/.test(ai.PROMPT),
+  );
+
   const newPerson = ai.normalize(
     {
       imageRows: baseImage.slice(0, 1),
@@ -756,6 +1229,33 @@ async function testAiExtraction() {
 
   // ---- 截断的端到端路径：要放在 const ai 之后（函数体里会用到它）----
   await testTruncationEndToEnd();
+
+  // ---- 多图读取闸门：格式、单张体积、张数、合计体积 ----
+  const fakeFile = (name, type, size) => ({ name: name, type: type, size: size });
+  const readStub = () => Promise.resolve("data:image/jpeg;base64,QQ==");
+  const batch = await ai.addImageFiles(
+    [],
+    [fakeFile("a.jpg", "image/jpeg", 100), fakeFile("b.bmp", "image/bmp", 10), fakeFile("c.png", "image/png", 100)],
+    readStub,
+  );
+  equal("合法的两张都收下（坏图不连累好图）", batch.images.length, 2);
+  equal("非法格式只报一条", batch.errors.length, 1);
+  check("错误里点名是哪张图", /b\.bmp/.test(batch.errors[0]), batch.errors[0]);
+  check("读进来的图片带体积（合计闸门要用）", batch.images[0].bytes === 100);
+
+  const overflow = await ai.addImageFiles(
+    new Array(ai.MAX_IMAGES).fill(null).map(() => ({ bytes: 1 })),
+    [fakeFile("d.jpg", "image/jpeg", 100)],
+    readStub,
+  );
+  equal("超过张数上限不再追加", overflow.images.length, ai.MAX_IMAGES);
+  check("超过张数时给出可操作的提示", /最多一次解析/.test(overflow.errors.join("")), overflow.errors.join("|"));
+
+  check("张数上限远小于图片 token 会把预算吃光的量级", ai.MAX_IMAGES >= 2 && ai.MAX_IMAGES <= 8, String(ai.MAX_IMAGES));
+  check(
+    "合计体积上限不小于单张上限（否则单张合法图也传不出去）",
+    ai.MAX_TOTAL_IMAGE_BYTES >= ai.MAX_IMAGE_BYTES,
+  );
 
   // ---- normalize：必须复用 core 的校验，不能自己写一套 ----
   const good = ai.normalize(

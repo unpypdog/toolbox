@@ -152,30 +152,77 @@
     return hits >= 2 ? columns : null;
   }
 
-  /** 日期解析：兼容 2026/5/12、2026-05-12、2026.5.12、2026年5月12日，允许分隔符周围有空格。 */
-  function parseDate(value) {
-    const normalized = stripOuter(value)
+  /**
+   * 日期解析的唯一实现：兼容 2026/5/12、2026-05-12、2026.5.12、2026年5月12日（含「号」），
+   * 也接受**只有年月或只有年**的形态（22年10月、2022-10、2022）。
+   *
+   * 为什么必须接受不完整日期：素材里经常只有年月。聊天记录里写的是「那张图片里的名单写
+   * 〈年份〉年〈月份〉月份左右」，日根本不存在；旧实现对这种输入直接抛「日期格式无法识别」，
+   * 于是模型只剩两条路 —— 丢掉日期，或者自己编一个「日」，后者会静默印出日期错误的证书。
+   * 现在把读到的那部分读进来，由 validateRecord 标成「日期不完整」并保持 invalid：
+   * 生成闸门不放行，用户只需要补上缺的那一段。
+   *
+   * @returns {{year:string, month:string, day:string, complete:boolean}}
+   */
+  function parseDateParts(value) {
+    const text = stripOuter(value);
+    const normalized = text
       .replace(/[年月]/g, "/")
-      .replace(/日/g, "")
+      .replace(/[日号]/g, "")
       .replace(/[-.]/g, "/")
-      .replace(/\/+/g, "/");
-    if (!/^\s*\d{1,4}\s*\/\s*\d{1,2}\s*\/\s*\d{1,2}\s*$/.test(normalized)) {
-      throw new Error("日期格式无法识别：" + stripOuter(value));
+      .replace(/\/+/g, "/")
+      // 「22年10月」「2022年」这类写法末尾会留下一个分隔符，先削掉再匹配，
+      // 否则只有年月的日期会被判成「格式无法识别」——正是要修的那个场景。
+      .replace(/\/+$/, "");
+    // 一段（只有年）、两段（年月）、三段（年月日）都收。
+    // 一段必须是四位年份：否则日期格里的「10」「25」会被读成 2010 年 / 2025 年，
+    // 比一句「无法识别」更误导人。
+    const match = normalized.match(
+      /^\s*(\d{1,4})\s*(?:\/\s*(\d{1,2}))?(?:\s*\/\s*(\d{1,2}))?\s*$/,
+    );
+    if (!match || (!match[2] && match[1].length < 4)) {
+      throw new Error("日期格式无法识别：" + text);
     }
-    const [yearRaw, monthRaw, dayRaw] = normalized.split("/").map((part) => stripOuter(part));
     // 手输场景常见「25年10月10日」，两位年份按 20xx 处理
-    const year = yearRaw.length <= 2 ? 2000 + Number(yearRaw) : Number(yearRaw);
-    const month = Number(monthRaw);
-    const day = Number(dayRaw);
-    if (year < 1900 || year > 2999) throw new Error("年份超出范围：" + stripOuter(value));
-    if (month < 1 || month > 12) throw new Error("月份超出范围：" + stripOuter(value));
-    const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
-    if (day < 1 || day > lastDay) throw new Error("日期不存在：" + stripOuter(value));
+    const year = match[1].length <= 2 ? 2000 + Number(match[1]) : Number(match[1]);
+    const month = match[2] ? Number(match[2]) : 0;
+    const day = match[3] ? Number(match[3]) : 0;
+    if (year < 1900 || year > 2999) throw new Error("年份超出范围：" + text);
+    if (match[2] && (month < 1 || month > 12)) throw new Error("月份超出范围：" + text);
+    if (match[3]) {
+      const lastDay = new Date(Date.UTC(year, month, 0)).getUTCDate();
+      if (day < 1 || day > lastDay) throw new Error("日期不存在：" + text);
+    }
     return {
       year: String(year),
-      month: String(month).padStart(2, "0"),
-      day: String(day).padStart(2, "0"),
+      month: match[2] ? String(month).padStart(2, "0") : "",
+      day: match[3] ? String(day).padStart(2, "0") : "",
+      complete: Boolean(match[2] && match[3]),
     };
+  }
+
+  /**
+   * 严格解析：必须精确到「日」，缺段一律抛错。
+   * 这是**对外契约**（parseDate 的调用方都要求完整日期），不完整日期只走 validateRecord。
+   */
+  function parseDate(value) {
+    const parts = parseDateParts(value);
+    if (!parts.complete) {
+      throw new Error(
+        "日期不完整（缺" + (parts.month ? "「日」" : "「月」「日」") + "）：" + stripOuter(value),
+      );
+    }
+    return { year: parts.year, month: parts.month, day: parts.day };
+  }
+
+  /** 把「只读到哪一段」写成给用户看的提示：能补的只是缺的那一段。 */
+  function incompleteDateMessage(parts) {
+    const known = parts.month
+      ? parts.year + " 年 " + Number(parts.month) + " 月"
+      : parts.year + " 年";
+    return (
+      "日期不完整：只读到 " + known + "，请补" + (parts.month ? "「日」" : "「月」「日」")
+    );
   }
 
   /* -------------------------------------------------------------- 数据行 */
@@ -208,7 +255,15 @@
     let date = null;
     if (dateRaw) {
       try {
-        date = parseDate(dateRaw);
+        const parts = parseDateParts(dateRaw);
+        if (parts.complete) {
+          date = { year: parts.year, month: parts.month, day: parts.day };
+        } else {
+          // 读到年月（甚至只有年）不是「格式错误」而是信息不完整：
+          // 仍然是 invalid（不会进生成队列），但用户只需要补缺的那一段，
+          // 不必把整条日期重打。
+          issues.push(incompleteDateMessage(parts));
+        }
       } catch (error) {
         issues.push(error.message);
       }
@@ -789,6 +844,7 @@
     normalizeHeader: normalizeHeader,
     matchHeaderRow: matchHeaderRow,
     parseDate: parseDate,
+    parseDateParts: parseDateParts,
     validateRecord: validateRecord,
     assignOutputNames: assignOutputNames,
     prepareRecords: prepareRecords,

@@ -539,7 +539,7 @@ if (aiProvider) {
 }
 
 console.log("\n[9] AI 相关监听已绑定");
-for (const id of ["aiProvider", "aiParseBtn", "aiImageInput", "aiImageLabel", "aiClearImageBtn"]) {
+for (const id of ["aiProvider", "aiParseBtn", "aiImageInput", "aiImageLabel", "aiImageList", "aiClearImageBtn"]) {
   const element = app.registry.get(id);
   check(
     id + " 绑定了事件",
@@ -554,6 +554,25 @@ for (const id of ["aiProvider", "aiParseBtn", "aiImageInput", "aiImageLabel", "a
 const aiImageLabel = app.registry.get("aiImageLabel");
 check("图片拖放区监听了 dragover（否则拖入会把浏览器拽去打开图片）", aiImageLabel && aiImageLabel.hasListener("dragover"));
 check("图片拖放区监听了 drop", aiImageLabel && aiImageLabel.hasListener("drop"));
+
+// 逐张移除用的是事件委托（按钮是动态生成的，不能逐个绑定）。
+// 这里只验证「点一下不会抛」：桩里 aiImages 为空，处理函数应当直接返回。
+const aiImageList = app.registry.get("aiImageList");
+check("已选图片列表监听了 click（逐张移除靠它）", aiImageList && aiImageList.hasListener("click"));
+let removeThrew = null;
+try {
+  aiImageList.dispatch("click", { type: "click", target: { dataset: { removeImage: "0" } } });
+  aiImageList.dispatch("click", { type: "click", target: {} });
+} catch (error) {
+  removeThrew = error;
+}
+check("点击移除按钮不抛异常（空列表时直接返回）", removeThrew === null, removeThrew && removeThrew.message);
+check(
+  "HTML 上图片输入允许选多张",
+  /<input id="aiImageInput"[^>]*\bmultiple\b/.test(
+    fs.readFileSync(path.join(TOOL, "index.html"), "utf8"),
+  ),
+);
 
 console.log("\n[10] PDF 输出方式开关");
 {

@@ -60,8 +60,13 @@ const state = {
     merged: "TE操作培训证书_{份数}份_{时间}",
     archive: "TE操作培训证书_{时间}",
   },
-  /** 待解析的图片：{ base64, mime, name } */
-  aiImage: null,
+  /**
+   * 待解析的图片，数组顺序就是模型看到的编号顺序（1 开始）。
+   * 多张图的典型用法：聊天截图（说明与残缺名单）+ 一张完整名单，
+   * 由 cert-ai 的同名合并把两处补齐成一份。
+   * @type {Array<{base64:string, mime:string, name:string, bytes:number}>}
+   */
+  aiImages: [],
   /** 让用户中途取消 AI 解析 */
   aiAbort: null,
   /** 编辑中的单元格定位，重渲染后用来恢复焦点与光标 */
@@ -86,7 +91,8 @@ document.addEventListener("DOMContentLoaded", () => {
     "namingDetails", "pdfNamePattern", "mergedNamePattern", "zipNamePattern", "namingPreview",
     "namingResetBtn",
     "aiProvider", "aiFields", "aiHelp", "aiNote", "aiParseBtn", "aiImageInput", "aiImageLabel",
-    "aiImageSummary", "aiImageName", "aiImageMeta", "aiClearImageBtn",
+    "aiImageSummary", "aiImageName", "aiImageMeta", "aiImageList", "aiClearImageBtn",
+    "aiRawBlock", "aiRawOutput",
   ].forEach((id) => {
     els[id] = document.getElementById(id);
   });
@@ -210,8 +216,12 @@ function bindEvents() {
     });
 
     els.aiImageInput.addEventListener("change", (event) => {
-      const file = event.target.files && event.target.files[0];
-      if (file) void loadAiImage(file);
+      // 必须先拷成数组再清空 input.value：files 是**活的** FileList，
+      // 清空 value 会让它当场变成空列表，后面读到 0 张 —— 表现就是"选了没反应"。
+      const files = Array.prototype.slice.call(event.target.files || []);
+      // 清空取值：否则连选两次同一张图不会触发 change（用户会以为按钮坏了）
+      event.target.value = "";
+      if (files.length) void loadAiImages(files);
     });
     // 拖放：与 CSV 导入同一套交互，但要 preventDefault 否则浏览器会直接打开图片
     ["dragover", "dragenter"].forEach((name) => {
@@ -228,11 +238,19 @@ function bindEvents() {
     els.aiImageLabel.addEventListener("drop", (event) => {
       event.preventDefault();
       els.aiImageLabel.classList.remove("is-dragging");
-      const file = event.dataTransfer && event.dataTransfer.files && event.dataTransfer.files[0];
-      if (file) void loadAiImage(file);
+      const files = event.dataTransfer && event.dataTransfer.files;
+      if (files && files.length) void loadAiImages(files);
     });
 
-    els.aiClearImageBtn.addEventListener("click", clearAiImage);
+    // 逐张移除：按钮由 renderAiImageList 动态生成，所以用事件委托而不是逐个绑定
+    els.aiImageList.addEventListener("click", (event) => {
+      const target = event && event.target;
+      const index = target && target.dataset ? target.dataset.removeImage : undefined;
+      if (index === undefined) return;
+      removeAiImage(Number(index));
+    });
+
+    els.aiClearImageBtn.addEventListener("click", clearAiImages);
     els.aiParseBtn.addEventListener("click", () => void runAiParse());
   }
 
@@ -308,6 +326,58 @@ function reportParseResult(incoming, notes) {
   if (notes && notes.length) parts.push(notes.join("；"));
   setNotice(parts.join("。") + "。", problem ? "warn" : "success");
   showToast(`已解析 ${incoming.length} 条记录。`, problem ? "error" : "success");
+}
+
+/**
+ * 整批都缺某一列时，明确说出「材料里没有」。
+ *
+ * 一列全是「点击填写」时，用户只会以为解析坏了 —— 实际上模型只认材料里出现过的信息，
+ * 没写在图里/文本里的日期它不会替你编（这正是约束 8 那次事故的教训）。
+ * 把这句话摆到提示条里，比让人对着空列猜要省事得多。
+ */
+function missingFieldHints(records) {
+  if (!records.length) return [];
+  return [
+    { key: "dateRaw", label: "日期" },
+    { key: "hospital", label: "医院名称" },
+    { key: "name", label: "姓名" },
+  ]
+    .filter((field) => records.every((record) => !String(record[field.key] || "").trim()))
+    .map(
+      (field) =>
+        `${records.length} 条都没有${field.label}：材料里没有就不会替你编，` +
+        `请把写着${field.label}的那张图/那句话一起给它`,
+    );
+}
+
+/**
+ * 把这次 AI 的原始返回摊开给用户看。
+ *
+ * 为什么必须能看：这是唯一能区分「模型压根没给日期」和「给了但没落到行上」的地方。
+ * 缺了它，一列「点击填写」只能靠猜，而这两种原因的修法完全相反。
+ */
+function renderAiRaw(result, meta) {
+  if (!els.aiRawBlock || !els.aiRawOutput) return;
+  const warnings = Array.isArray(result.warnings) ? result.warnings : [];
+  const lines = [
+    "服务：" + (meta.providerLabel || "-") + " · 模型：" + (meta.model || "-"),
+    "图片：" + (meta.imageCount ? meta.imageCount + " 张" : "无") +
+      " · 文字：" + (meta.hasText ? "有" : "无"),
+    "",
+    "—— 模型返回的 json（原文）——",
+    String(result.raw || "（空）"),
+    "",
+    "—— 本地工作流的处理说明（" + warnings.length + " 条）——",
+  ];
+  if (warnings.length) warnings.forEach((warning) => lines.push("· " + warning));
+  else lines.push("（无：每条赋值都找到了目标，或本来就没有赋值）");
+  if (result.unreadable) lines.push("", "—— 模型说读不到的部分 ——", result.unreadable);
+  if (result.usage) {
+    lines.push("", "—— 用量 ——", "tokens：" + (result.usage.total_tokens || "?"));
+  }
+  els.aiRawOutput.textContent = lines.join("\n");
+  els.aiRawBlock.hidden = false;
+  els.aiRawBlock.open = false;
 }
 
 /* ---------------------------------------------------------- 文件导入 */
@@ -697,10 +767,10 @@ function refreshButtons() {
   // AI 解析：选了服务、且（有文本或有图片）才可点。
   // 与 PDF 按钮同样的思路 —— 配置不全时先禁用，而不是点了才报错。
   if (els.aiParseBtn) {
-    const hasContent = Boolean(els.quickInput.value.trim() || state.aiImage);
+    const hasContent = Boolean(els.quickInput.value.trim() || state.aiImages.length);
     const aiReady = Boolean(state.aiProvider && window.CertAi && hasContent);
     els.aiParseBtn.disabled = state.generating || !aiReady;
-    els.aiClearImageBtn.disabled = state.generating || !state.aiImage;
+    els.aiClearImageBtn.disabled = state.generating || !state.aiImages.length;
   }
 }
 
@@ -1255,40 +1325,99 @@ function collectAiSettings() {
   return settings;
 }
 
-/** 把 File 读成 { base64, mime, name }，本地先做格式与体积检查。 */
-async function loadAiImage(file) {
+/**
+ * 把 File 列表读成图片并追加到待解析列表。
+ *
+ * 一张坏图不该让整批失败：能读的先收下，读不了的逐条提示（cert-ai 的 addImageFiles
+ * 负责格式、单张体积、张数与合计体积四道闸门）。
+ */
+async function loadAiImages(files) {
   try {
-    const image = await window.CertAi.readImageFile(file, readAsDataUrl);
-    state.aiImage = image;
+    const result = await window.CertAi.addImageFiles(state.aiImages, files, readAsDataUrl);
+    state.aiImages = result.images;
     renderAiImageSummary();
     render();
-    setNotice("已选择图片「" + image.name + "」，点「AI 解析」开始识别。", "success");
+    const added = result.images.length;
+    if (result.errors.length) {
+      setNotice(result.errors.join("；"), "error");
+      showToast(result.errors[0], "error");
+    } else {
+      setNotice(
+        "已选择 " + added + " 张图片（按顺序编号），点「AI 解析」开始识别。",
+        "success",
+      );
+    }
   } catch (error) {
-    state.aiImage = null;
-    els.aiImageInput.value = "";
-    renderAiImageSummary();
-    render();
-    setNotice(error.message, "error");
-    showToast(error.message, "error");
+    setNotice(error && error.message ? error.message : "图片读取失败。", "error");
+    showToast("图片读取失败。", "error");
   }
 }
 
-function clearAiImage() {
-  state.aiImage = null;
+/** 移除第 index 张（0 开始）：编号即模型看到的顺序，所以移除后要重排列表。 */
+function removeAiImage(index) {
+  if (!(index >= 0) || index >= state.aiImages.length) return;
+  const [removed] = state.aiImages.splice(index, 1);
+  renderAiImageSummary();
+  render();
+  setNotice("已移除图片「" + ((removed && removed.name) || "") + "」。");
+}
+
+function clearAiImages() {
+  state.aiImages = [];
   els.aiImageInput.value = "";
   renderAiImageSummary();
   render();
-  setNotice("已移除图片。");
+  setNotice("已移除全部图片。");
 }
 
 function renderAiImageSummary() {
   if (!els.aiImageSummary) return;
-  const image = state.aiImage;
-  els.aiImageSummary.classList.toggle("is-empty", !image);
-  els.aiImageName.textContent = image ? image.name : "尚未选择图片";
-  els.aiImageMeta.textContent = image
-    ? image.mime.replace("image/", "").toUpperCase()
+  const images = state.aiImages;
+  els.aiImageSummary.classList.toggle("is-empty", !images.length);
+  els.aiImageName.textContent = images.length
+    ? images.length === 1
+      ? images[0].name
+      : "已选 " + images.length + " 张图片（按下面 1~" + images.length + " 的顺序解析）"
+    : "尚未选择图片";
+  const total = images.reduce((sum, image) => sum + (Number(image.bytes) || 0), 0);
+  els.aiImageMeta.textContent = images.length
+    ? images.length + " 张 · 合计 " + formatBytes(total) +
+      " · 上限 " + window.CertAi.MAX_IMAGES + " 张"
     : "";
+  renderAiImageList();
+}
+
+/** 已选图片逐张列出来：编号就是模型看到的顺序，逐张可移除。 */
+function renderAiImageList() {
+  if (!els.aiImageList) return;
+  els.aiImageList.textContent = "";
+  state.aiImages.forEach((image, index) => {
+    const item = document.createElement("li");
+    item.className = "image-item";
+
+    const name = document.createElement("span");
+    name.className = "image-item-name";
+    name.textContent = index + 1 + ". " + image.name;
+
+    const meta = document.createElement("span");
+    meta.className = "image-item-meta";
+    meta.textContent =
+      formatBytes(Number(image.bytes) || 0) + " · " +
+      String(image.mime || "").replace("image/", "").toUpperCase();
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "image-item-remove";
+    remove.dataset.removeImage = String(index);
+    remove.title = "移除第 " + (index + 1) + " 张图片";
+    remove.setAttribute("aria-label", remove.title);
+    remove.textContent = "✕";
+
+    item.appendChild(name);
+    item.appendChild(meta);
+    item.appendChild(remove);
+    els.aiImageList.appendChild(item);
+  });
 }
 
 /**
@@ -1324,7 +1453,7 @@ async function runAiParse() {
   persistAi();
 
   const text = els.quickInput.value.trim();
-  if (!text && !state.aiImage) {
+  if (!text && !state.aiImages.length) {
     setNotice("没有可解析的内容：请填文本，或选一张名单图片。", "error");
     showToast("请先填文本或选图片。", "error");
     return;
@@ -1335,12 +1464,16 @@ async function runAiParse() {
   state.aiAbort = new AbortController();
   render();
   setProgress(0, 1, "准备中");
-  logActivity(`开始 AI 解析（${provider.label}${state.aiImage ? "，含图片" : ""}）`);
+  logActivity(
+    `开始 AI 解析（${provider.label}` +
+      (state.aiImages.length ? `，含 ${state.aiImages.length} 张图片` : "") +
+      "）",
+  );
 
   try {
     const result = await window.CertAi.extractRecords({
       text: text,
-      image: state.aiImage,
+      images: state.aiImages,
       apiKey: settings.apiKey,
       model: settings.model,
       endpoint: settings.endpoint,
@@ -1375,12 +1508,21 @@ async function runAiParse() {
 
     resetProgress();
     render();
+    renderAiRaw(result, {
+      providerLabel: provider.label,
+      model: settings.model,
+      imageCount: state.aiImages.length,
+      hasText: Boolean(text),
+    });
 
     const noted = incoming.filter((record) => record.aiNote).length;
     const notes = Array.isArray(result.warnings) ? result.warnings.slice() : [];
+    // 整列全空时先说清「是材料里没有」，别让人对着「点击填写」猜是不是坏了
+    missingFieldHints(incoming).forEach((hint) => notes.push(hint));
     if (result.unreadable) notes.push(result.unreadable);
     if (noted) notes.push(`${noted} 条 AI 标了存疑，请重点核对`);
     reportParseResult(incoming, notes);
+    notes.forEach((note) => logActivity("解析说明：" + note));
 
     logActivity(
       `AI 解析完成：新增 ${incoming.length} 条` +

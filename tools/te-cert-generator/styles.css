@@ -1231,6 +1231,33 @@ footer {
   font-size: 0.72rem;
 }
 
+/* AI 原始返回：模型到底给了什么、本地工作流又怎么处理的，全在这里摊开。
+   少了它，「某一列没解析出来」就只能靠猜 —— 而「模型没给」和「给了没落地」
+   是两种完全相反的修法。 */
+.raw-block {
+  margin-top: 10px;
+  font-size: 0.76rem;
+}
+
+.raw-block summary {
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.raw-output {
+  max-height: 280px;
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.72rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: rgba(23, 15, 43, 0.05);
+  border-left: 3px solid var(--violet-deep);
+}
+
 /* AI 标出的存疑提示。它和 issues 一样会让这一行进入「需处理」（证书信息不能带着
    模型疑问直接生成），但颜色分开：issue 是「不合规」，这条是「模型自己说没把握」。 */
 .ai-note {
@@ -1240,6 +1267,56 @@ footer {
   line-height: 1.5;
   color: #8a5a00;
   overflow-wrap: anywhere;
+}
+
+/* 已选图片列表：一张一行，行尾一个移除按钮。
+   多张图要能一眼看出「第几张是哪张」——编号顺序就是模型看到的顺序。 */
+.image-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.image-list:empty {
+  margin: 0;
+}
+
+.image-item {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding: 6px 8px;
+  font-size: 0.76rem;
+  background: rgba(23, 15, 43, 0.04);
+  border-left: 3px solid var(--violet-deep);
+}
+
+.image-item-name {
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+.image-item-meta {
+  color: var(--ink-soft);
+  white-space: nowrap;
+}
+
+.image-item-remove {
+  margin-left: auto;
+  padding: 0 4px;
+  font: inherit;
+  line-height: 1.4;
+  color: var(--ink-soft);
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+.image-item-remove:hover,
+.image-item-remove:focus-visible {
+  color: #b3261e;
 }
 
 /* AI 字段来源标记：只标「文字覆盖进来的」值，图片原值不标。
