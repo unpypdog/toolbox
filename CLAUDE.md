@@ -22,6 +22,7 @@ toolbox/
 │   └── te-cert-generator/  # TE 培训证书批量生成
 │       ├── index.html
 │       ├── app.js
+│       ├── ai-mode-boot.js         # 「AI 工作站」布局的早期开关（必须放在 body 末尾、不能 defer）
 │       ├── cert-core.js            # 名单解析、校验、命名、模板读取、排版槽位（无网络）
 │       ├── cert-direct-pdf.js      # 固定背景 + Canvas 文字的离线 PDF 生成（唯一生成路径）
 │       ├── cert-ai.js              # AI 名单抽取（OpenAI 兼容接口，支持图片）
@@ -29,8 +30,8 @@ toolbox/
 │       ├── build-templates.js      # docx → base64 载荷（改了 docx 必须重跑）
 │       ├── template-*.docx         # 证书模板（只作为背景图载体）
 │       ├── template-*.b64.js       # 模板载荷（file:// 下靠它读模板）
-│       ├── vendor/pdf-lib.min.js   # 本地 PDF 组装库（含 MIT 许可）
-│       └── xlsx.full.min.js
+│       ├── vendor/pdf-lib.min.js   # 本地 PDF 组装库（含 MIT 许可，按需加载）
+│       └── xlsx.full.min.js        # Excel 导入用（按需加载）
 │       # 注：cert-cloud.js / cert-merge.js 已删除，见硬约束 12
 └── tests/                  # 测试文件
     ├── screenshots/        # 测试截图（gitignore）
@@ -43,13 +44,14 @@ toolbox/
     ├── test_te_cert_direct_pdf.js        # 本地直接 PDF 逻辑
     ├── test_te_cert_direct_pdf_browser.py # 真实 Chromium 生成测试
     ├── test_te_cert_ai_images_browser.py # 真实 Chromium 多图输入测试
+    ├── test_te_cert_mobile_boot.py       # 真实 Chromium 手机端首屏与 AI 工作站切换（限速）
     ├── lint_te_cert_generator.js         # 证书工具接线检查（纯 Node）
     └── test_te_cert_dom_smoke.js         # 证书工具 DOM 冒烟（最小 DOM 桩）
 ```
 
-### te-cert-generator 的十四条硬约束
+### te-cert-generator 的十五条硬约束
 
-改这个工具前先读这十四条，都是踩过的坑：
+改这个工具前先读这十五条，都是踩过的坑：
 
 1. **模板改了必须重跑载荷**：`node tools/te-cert-generator/build-templates.js`。
    `file://` 下 Chromium 拒绝 fetch 同目录的 docx，模板只能靠 base64 载荷用
@@ -220,6 +222,30 @@ toolbox/
     护栏在 `test_te_cert_generator_core.js` 的 `[4]` 节（合并 / 冲突 / 图内行号定位 /
     更粗日期不覆盖 / 张数与体积闸门 / **DeepSeek 真实返回的整段回归**），
     接线检查在 `lint_te_cert_generator.js`，真实浏览器路径在 `test_te_cert_ai_images_browser.py`。
+
+15. **首屏只加载必需脚本；「AI 工作站」布局不许依赖那些大脚本**。这两条是同一次
+    手机端投诉的两个面（"手机打开要缓存好久才正常，电脑端直接就能开"）：
+    - **大库按需加载**：`xlsx.full.min.js`（约 0.9 MB）与 `vendor/pdf-lib.min.js`（约 0.5 MB）
+      合计是首屏体积的 86%，却只有「导入 Excel」「生成 PDF」用得上 ——
+      它们由 `app.js` 的 `ensureLibrary()`（`LAZY_LIBRARIES` / `loadScriptOnce`）
+      在真正需要时注入，**不要再写回 `<head>`**。桌面端宽带感觉不到差别，
+      手机端实测 400 kbps 下 DOMContentLoaded 从 14s 降到约 2s。
+      注入前要给提示（`setNotice` / `setProgress` 显示"正在加载…"），
+      否则用户对着不动的按钮猜；PDF 引擎另有一条 `prefetchPdfEngine()`
+      在页面可用后趁空闲预取，省流（`saveData`）或 2G 下不预取。
+    - **布局必须脱离 defer 脚本**：展开 `#aiBlock` 要切 `.ai-mode`（AI 工作站布局）。
+      这件事原先只在 `app.js` 的 toggle 监听里做，而 `app.js` 是 defer 的、排在那一串
+      大文件后面；手机端首屏 HTML/CSS 一两秒就画出来了，用户在这段窗口里点开面板时
+      `<details>` 照常展开（浏览器原生行为），但 **toggle 事件早于监听器绑定触发**，
+      `.ai-mode` 于是永远补不上 —— 现象是「点了 AI 工作站，出来的还是设置页那一坨」，
+      再等也不会自己恢复。现在由 `ai-mode-boot.js`（几百字节、**放在 body 末尾且不能
+      defer**、`<head>` 里有 `rel=preload`）在解析期接管；`app.js` 保留
+      `syncAiModeFromDom()` 作为兜底。改这块时**不要**把布局逻辑挪回 defer 脚本。
+    - 护栏：`test_te_cert_mobile_boot.py`（真实 Chromium + 限速 + 移动视口）。
+      其中场景 A 把 5 个 defer 脚本**全部掐断**，仍要求点开面板切进 AI 工作站 ——
+      这条是确定性的，不靠"网够快"；场景 B 断言首屏请求白名单与体积预算
+      （新增任何首屏文件都会当场失败）。`lint_te_cert_generator.js` 的 `[2]` 节
+      成对断言「首屏不含 xlsx/pdf-lib」+「app.js 有加载点」+「文件在位」。
 
 
 ### te-cert-generator 参考资料：字体与姓名框几何

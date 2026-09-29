@@ -45,6 +45,7 @@ node tests/test_te_cert_dom_smoke.js
 # Real Chromium end-to-end tests (need uv sync first)
 uv run python tests/test_te_cert_direct_pdf_browser.py
 uv run python tests/test_te_cert_ai_images_browser.py
+uv run python tests/test_te_cert_mobile_boot.py
 ```
 
 ## 工具列表
@@ -77,6 +78,29 @@ uv run python tests/test_te_cert_ai_images_browser.py
   一句话叙述、**手机拍的签到表照片**、**微信聊天记录截图**、以及**图片 + 文字混合**都交给 AI
   （OpenAI 兼容接口，默认 DeepSeek）。**一次可以给多张图**（最多 4 张）。
   这是工具里**唯一**会联网的功能。
+
+#### 手机端打开很快，因为首屏不带那两个大库
+
+`xlsx.full.min.js`（约 0.9 MB，只在导入 Excel 时用）与 `vendor/pdf-lib.min.js`
+（约 0.5 MB，只在生成 PDF 时用）曾经写在 `<head>` 里，占首屏体积的 **86%**。
+手机网络下这一等就是十几秒，而「打开页面 → 切到 AI 名单工作台」这条最常见的路径
+一个库都用不到。现在它们由 `app.js` 的 `ensureLibrary()` 在真正需要时注入，
+首屏只剩约 65 KB（gzip）：
+
+| | 首屏请求 | DOMContentLoaded（400 kbps 模拟） |
+|---|---|---|
+| 改动前 | 约 633 KB | 约 14 s |
+| 改动后 | 约 66 KB | 约 2 s |
+
+首次导入 Excel / 首次生成 PDF 会多一次下载，页面会直接显示「正在加载…」；
+PDF 引擎还会在页面可用后**趁空闲预取**（省流模式或 2G 下不预取），
+所以绝大多数情况下点「生成」时它已经就位。
+
+展开「AI 名单工作台」时切换的**AI 工作站布局不依赖那些大脚本**：
+它由一个几百字节的 `ai-mode-boot.js` 在解析期接管。此前这段逻辑只在 defer 的
+`app.js` 里，手机端首屏出来得早、脚本到得晚，用户在那段窗口里点开面板时
+`<details>` 已经展开、`toggle` 事件却早于监听器触发，布局永远停在中途 ——
+这就是「手机端要等缓存好了才正常，电脑端直接能开」的另一半原因。
 
 ### AI 与本地工作流怎么处理图片和文字
 

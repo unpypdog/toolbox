@@ -95,7 +95,78 @@ const scripts = (indexHtml.match(/<script[^>]*src="([^"]+)"/g) || []).map((t) =>
 check("页面引用了 cert-ai.js", scripts.includes("./cert-ai.js"), scripts.join(", "));
 check("页面引用了 AI 会话模块", scripts.includes("./cert-ai-session.js"), scripts.join(", "));
 check("页面引用了本地直接 PDF 模块", scripts.includes("./cert-direct-pdf.js"), scripts.join(", "));
-check("页面从本地 vendor 加载 pdf-lib", scripts.includes("./vendor/pdf-lib.min.js"), scripts.join(", "));
+
+// xlsx 与 pdf-lib 合计约 1.4 MB，是首屏体积的 86%，但只有「导入 Excel」「生成 PDF」
+// 才用得上 —— 它们必须是按需注入的，不能再写回 head：
+// 手机端实测 400 kbps 下，带着它们 DOMContentLoaded 要 14s，去掉约 2s，
+// 而「展开 AI 名单工作台」这条路一个都用不到。
+// 只断言"不引用"是不够的（把 <script> 删掉、loader 也删掉同样能过），
+// 所以成对断言：首屏不含 + app.js 里有加载点 + 文件真的在。
+for (const lib of [
+  { name: "xlsx", src: "./xlsx.full.min.js", file: "xlsx.full.min.js", global: "XLSX" },
+  { name: "pdf-lib", src: "./vendor/pdf-lib.min.js", file: "vendor/pdf-lib.min.js", global: "PDFLib" },
+]) {
+  check(
+    lib.name + " 不在首屏脚本列表里（否则手机端要白等 1.4 MB）",
+    !scripts.includes(lib.src),
+    "又写回 head 了：首屏会连带下载 " + lib.src,
+  );
+  check(
+    "app.js 有 " + lib.name + " 的按需加载点",
+    new RegExp('"' + lib.src.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") + '"').test(appJs) &&
+      new RegExp('global:\\s*"' + lib.global + '"').test(appJs),
+    "LAZY_LIBRARIES 里缺少 " + lib.src + " / " + lib.global,
+  );
+  check(
+    lib.name + " 文件在位（按需加载也要求文件真的存在）",
+    fs.existsSync(path.join(TOOL, lib.file)),
+    lib.file,
+  );
+}
+check(
+  "需要时才加载：生成 PDF 前先 await ensureLibrary(\"pdfLib\")",
+  /async function generatePdf[\s\S]*?await ensureLibrary\("pdfLib"\)[\s\S]{0,200}?loadTemplate\(/.test(appJs),
+  "少了它，首屏省下的体积会变成生成时一句「PDF 引擎未加载」",
+);
+check(
+  "需要时才加载：读 Excel 前先 await ensureLibrary(\"xlsx\")",
+  /async function readWorkbook[\s\S]{0,400}?ensureLibrary\("xlsx"\)/.test(appJs),
+  "少了它，导入 xlsx 会直接报「Excel 解析组件未加载」",
+);
+
+// 「AI 工作站」布局必须脱离 defer 脚本。
+// 真机故障：手机端首屏 HTML 一两秒就画出来，而 defer 脚本要等十几秒；
+// 用户在窗口里点开 #aiBlock 时 toggle 事件早于监听器绑定触发，
+// .ai-mode 永远补不上 —— 点了没反应，且不会自己恢复。
+const bootTags = indexHtml.match(/<script[^>]*src="\.\/ai-mode-boot\.js"[^>]*>/g) || [];
+check("页面引用了 ai-mode-boot.js", bootTags.length === 1, bootTags.join(" | "));
+check(
+  "ai-mode-boot.js 没有 defer / async（有就排到 defer 脚本之后，等于没做）",
+  bootTags.length === 1 && !/\b(defer|async)\b/.test(bootTags[0]),
+  bootTags[0],
+);
+const bootScriptIndex = indexHtml.search(/<script[^>]*src="\.\/ai-mode-boot\.js"[^>]*>/);
+check(
+  "ai-mode-boot.js 的 <script> 在 #aiBlock 之后（解析到它时元素已经存在）",
+  bootScriptIndex > indexHtml.indexOf('id="aiBlock"'),
+  "script 标签位置: " + bootScriptIndex + " / #aiBlock 位置: " + indexHtml.indexOf('id="aiBlock"'),
+);
+check(
+  "head 里 preload 了 ai-mode-boot.js",
+  /<link[^>]*rel="preload"[^>]*as="script"[^>]*href="\.\/ai-mode-boot\.js"/.test(indexHtml),
+  "慢网络下它会被 defer 脚本抢连接，实测被挤到 4s 才执行",
+);
+check(
+  "ai-mode-boot.js 会同步 .ai-mode",
+  /classList\.toggle\("ai-mode"/.test(read("ai-mode-boot.js")),
+  "少了这行，点开面板不会切到 AI 工作站布局",
+);
+check(
+  "app.js 保留同一份布局同步作为兜底",
+  /function syncAiModeFromDom\(/.test(appJs) && /syncAiModeFromDom\(\);/.test(appJs),
+  "小文件 404 或缓存过期时，状态不该永远停在中途",
+);
+
 check(
   "pdf-lib 不再请求缺失的 source map",
   !/sourceMappingURL=pdf-lib\.min\.js\.map/.test(read("vendor/pdf-lib.min.js")),

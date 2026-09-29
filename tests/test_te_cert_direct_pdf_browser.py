@@ -16,7 +16,9 @@ OUTPUT = ROOT / ".tmp-cert-experiment" / "browser-output"
 
 def generate(page, text: str, template: str, merged: bool, output_name: str) -> Path:
     page.goto(PAGE.as_uri(), wait_until="load")
-    page.wait_for_function("window.CertCore && window.CertDirectPdf && window.PDFLib")
+    # pdf-lib 现在是按需加载的（首屏不带那 0.5 MB），所以这里只等业务模块；
+    # 引擎由点「生成」时的那次 ensureLibrary("pdfLib") 拉下来。
+    page.wait_for_function("window.CertCore && window.CertDirectPdf")
     page.locator("#quickInput").fill(text)
     page.locator("#parseBtn").click()
     page.wait_for_function("document.querySelector('#statReady').textContent !== '0'")
@@ -32,6 +34,8 @@ def generate(page, text: str, template: str, merged: bool, output_name: str) -> 
     target = OUTPUT / output_name
     download.save_as(target)
     page.wait_for_function("document.querySelector('#noticeBar').textContent.includes('已生成')")
+    # 生成完成后引擎必须在位：否则上面的 PDF 只可能是别的东西产出的
+    assert page.evaluate("Boolean(window.PDFLib)"), "pdf-lib 没有被按需加载进来"
     return target
 
 

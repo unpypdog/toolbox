@@ -18,7 +18,8 @@
         这个域名是白名单写死的，不接受任意地址，避免变成通用外发通道。
         注意「其它 OpenAI 兼容接口」若填了白名单之外的地址，浏览器会直接拦掉 ——
         这是刻意的限制，不为任意端点开口子。
-      - script-src 保持 'self' —— 脚本只从本目录加载，包括本机首选的 base64 模板载荷。
+      - script-src 保持 'self' —— 脚本只从本目录加载，包括本机首选的 base64 模板载荷，
+        以及按需注入的 xlsx / pdf-lib（见下面的加载说明）。
     -->
     <meta
       http-equiv="Content-Security-Policy"
@@ -31,9 +32,22 @@
       href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='14' fill='%231f1140'/%3E%3Crect x='16' y='12' width='32' height='40' rx='3' fill='none' stroke='%23a78bfa' stroke-width='4'/%3E%3Cpath d='M23 24h18M23 32h18M23 40h11' stroke='%23a78bfa' stroke-width='3.5' stroke-linecap='round'/%3E%3Ccircle cx='44' cy='49' r='7' fill='%23fbbf24'/%3E%3C/svg%3E"
     />
     <link rel="stylesheet" href="./styles.css" />
-    <script defer src="./xlsx.full.min.js"></script>
+    <!--
+      提前把「AI 工作站」布局的早期开关拉下来。
+      它在 body 末尾、没有 defer，正常会随解析到达即执行；但慢网络下它会和下面 5 个
+      defer 脚本抢连接（HTTP/1.1 只有 6 条），实测被挤到 4s 才执行 ——
+      用户点开面板后仍要等几秒才切进 AI 工作站。preload 让它在第一轮就下来。
+    -->
+    <link rel="preload" as="script" href="./ai-mode-boot.js" />
+    <!--
+      首屏只加载「打开页面就要用」的脚本。
+      xlsx.full.min.js（约 0.9 MB）只有导入 Excel 才用得上，
+      vendor/pdf-lib.min.js（约 0.5 MB）只有生成 PDF 才用得上 ——
+      它们由 app.js 的 ensureLibrary() 在真正需要时注入，两者合计是首屏的 86%。
+      这不是微优化：手机端实测 400 kbps 下，带着这两个文件 DOMContentLoaded 要 14s，
+      去掉之后约 2s；而「切到 AI 工作站」根本不碰它们。
+    -->
     <script defer src="./cert-core.js"></script>
-    <script defer src="./vendor/pdf-lib.min.js"></script>
     <script defer src="./cert-direct-pdf.js"></script>
     <script defer src="./cert-ai.js"></script>
     <script defer src="./cert-ai-session.js"></script>
@@ -452,5 +466,12 @@
     </footer>
 
     <div id="toastRegion" class="toast-region" aria-live="assertive" aria-atomic="true"></div>
+
+    <!--
+      「AI 工作站」布局的早期开关，**不能加 defer**：加了就会排到上面的 defer 脚本之后，
+      等于什么都没解决。放在 body 末尾是为了 #aiBlock 已经解析出来。
+      背景见 ai-mode-boot.js 顶部注释 —— 手机端点开面板却切不进 AI 工作站，就是它引起的。
+    -->
+    <script src="./ai-mode-boot.js"></script>
   </body>
 </html>

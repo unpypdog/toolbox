@@ -116,12 +116,30 @@ document.addEventListener("DOMContentLoaded", () => {
     setNotice("本地 PDF 模块未加载，生成功能不可用，请刷新页面重试。", "error");
   }
 
+  // 布局兜底：通常由 ai-mode-boot.js 在解析期就完成了（那时本文件还没执行）。
+  // 这里再同步一次，是为了那个几百字节的文件 404、或被旧缓存挡住时，
+  // 行为退回改动前（脚本就绪后补上状态），而不是"点了没反应"。
+  syncAiModeFromDom();
+
   restoreAiSettings();
   restoreNamingSettings();
   bindEvents();
   render();
   void restoreAiSessions();
+  prefetchPdfEngine();
 });
+
+/**
+ * 把 #aiBlock 的 open 同步成 #workspace 的 .ai-mode（AI 工作站布局）。
+ *
+ * 布局这件事有两个触发点、一个状态：解析期的 ai-mode-boot.js 与这里的兜底。
+ * 两边都是幂等的同一行，谁先到都行 —— 真机故障的根因是"只有 defer 脚本这一个触发点"
+ * （见 ai-mode-boot.js 顶部）。
+ */
+function syncAiModeFromDom() {
+  if (!els.workspace || !els.aiBlock) return;
+  els.workspace.classList.toggle("ai-mode", els.aiBlock.open);
+}
 
 function bindEvents() {
   els.parseBtn.addEventListener("click", () => applyQuickInput());
@@ -268,7 +286,7 @@ function bindEvents() {
 
   if (els.aiBlock) {
     els.aiBlock.addEventListener("toggle", () => {
-      els.workspace.classList.toggle("ai-mode", els.aiBlock.open);
+      syncAiModeFromDom();
       if (els.aiBlock.open) {
         if (!els.aiComposer.value.trim() && els.quickInput.value.trim()) {
           els.aiComposer.value = els.quickInput.value.trim();
@@ -444,6 +462,10 @@ async function loadFile(file) {
   try {
     // 换文件时先清掉上一次的编码信息，否则先导入 GBK 再导入 xlsx 会残留旧编码
     state.encoding = "";
+    // Excel 组件是按需下载的（约 0.9 MB），首次导入要等一会儿 —— 先说清楚在等什么
+    if (extension !== "csv" && !window.XLSX) {
+      setNotice(`正在加载 ${LAZY_LIBRARIES.xlsx.label}（首次约 0.9 MB）…`);
+    }
     const matrix = extension === "csv" ? await readCsv(file) : await readWorkbook(file);
     const prepared = window.CertCore.prepareRecords(matrix);
     if (prepared.records.length > window.CertCore.MAX_ROWS) {
@@ -556,6 +578,15 @@ async function readCsv(file) {
 }
 
 async function readWorkbook(file) {
+  // Excel 解析组件不参与首屏：真的选了 xlsx/xls 才把那 0.9 MB 拉下来
+  try {
+    await ensureLibrary("xlsx");
+  } catch (error) {
+    throw new Error(
+      "Excel 解析组件加载失败（" + (error.message || error) + "）。" +
+        "可以先把表格另存为 CSV 再导入，CSV 不需要这个组件。",
+    );
+  }
   if (!window.XLSX) {
     throw new Error("Excel 解析组件未加载。请检查文件是否完整，或先另存为 CSV。");
   }
@@ -1077,6 +1108,117 @@ function resetProgress() {
   els.progressBar.style.width = "0%";
 }
 
+/* ------------------------------------------------- 按需加载本地组件 */
+
+/**
+ * 首屏只加载「打开页面就要用」的脚本，两个大块头按需注入。
+ *
+ * xlsx.full.min.js（约 0.9 MB）只有导入 Excel 才用得上，
+ * vendor/pdf-lib.min.js（约 0.5 MB）只有生成 PDF 才用得上 ——
+ * 合计约 1.4 MB，是首屏体积的 86%。以前它们写在 head 里 defer，
+ * 于是手机端必须等这 86% 下载完页面才点得动：实测 400 kbps + 移动视口下
+ * DOMContentLoaded 约 14s，去掉之后约 2s。
+ * 而用户最常做的那件事（展开「AI 名单工作台」）两个库一个都不需要。
+ *
+ * 代价是首次导入 Excel / 首次生成 PDF 要多等一次下载，所以这两处都要给提示，
+ * 不能让用户对着不动的按钮猜。注入的仍是本目录文件，CSP 的 script-src 'self' 照旧成立。
+ */
+const LAZY_LIBRARIES = {
+  xlsx: { src: "./xlsx.full.min.js", global: "XLSX", label: "Excel 解析组件" },
+  pdfLib: { src: "./vendor/pdf-lib.min.js", global: "PDFLib", label: "PDF 引擎" },
+};
+
+/** 同一个组件被并发请求时只注入一次（导入与生成可能同时触发）。 */
+const libraryPromises = new Map();
+
+/**
+ * 注入一个本地 js 并等它执行完（脚本里会把 window[global] 挂上）。
+ *
+ * 模板载荷（template-*.b64.js）与按需组件共用这一条路径：
+ * `file://` 下 Chromium 一律拒绝 fetch 同目录文件，但 <script src="本地文件"> 是允许的，
+ * 所以模块化加载只能走注入。注入后记两件事：
+ *
+ * - `data-script` 记住是谁注入的，重复调用不会再插一个；
+ * - `data-script-state` 记住成败，避免监听一个早就 load 过（或早就 error 过）的元素
+ *   而永远等不到事件。
+ */
+function loadScriptOnce(src, globalName) {
+  return new Promise((resolve, reject) => {
+    if (window[globalName]) {
+      resolve();
+      return;
+    }
+    const existing = document.querySelector(`script[data-script="${globalName}"]`);
+    if (existing) {
+      if (existing.dataset.scriptState === "loaded") {
+        resolve();
+        return;
+      }
+      if (existing.dataset.scriptState === "failed") {
+        reject(new Error(src + " 加载失败，请确认文件存在。"));
+        return;
+      }
+      existing.addEventListener("load", () => resolve());
+      existing.addEventListener("error", () => reject(new Error(src + " 加载失败。")));
+      return;
+    }
+    const script = document.createElement("script");
+    script.src = "./" + src;
+    script.dataset.script = globalName;
+    script.addEventListener("load", () => {
+      script.dataset.scriptState = "loaded";
+      if (window[globalName]) resolve();
+      else reject(new Error(`${src} 已加载但没有提供 ${globalName}。`));
+    });
+    script.addEventListener("error", () => {
+      script.dataset.scriptState = "failed";
+      // 失败的 <script> 留在 head 里会让重试永久失败（同一个元素再也不会 load）——
+      // 拔掉它，用户在下一次操作时才会真的重新下载一次。
+      if (script.parentNode) script.parentNode.removeChild(script);
+      reject(new Error(src + " 加载失败，请确认文件存在。"));
+    });
+    document.head.appendChild(script);
+  });
+}
+
+/** 确保某个按需组件可用；失败不缓存，用户重试还能再来一次。 */
+function ensureLibrary(name) {
+  const spec = LAZY_LIBRARIES[name];
+  if (!spec) return Promise.reject(new Error("未知组件：" + name));
+  if (window[spec.global]) return Promise.resolve();
+  if (!libraryPromises.has(name)) {
+    const pending = loadScriptOnce(spec.src, spec.global).catch((error) => {
+      libraryPromises.delete(name);
+      throw error;
+    });
+    libraryPromises.set(name, pending);
+  }
+  return libraryPromises.get(name);
+}
+
+/**
+ * 页面能用了之后，趁空闲把 PDF 引擎悄悄拉下来。
+ *
+ * 生成证书是这个工具的主线动作，几乎每个用户最后都会走到 ——
+ * 但首屏不该为它买单。所以：先让页面立刻可用，闲下来再补下载，
+ * 等用户填完名单点生成时它通常已经在了。
+ *
+ * 尊重省流：saveData 或 2G 网络下不做这次预取，等真正点生成时再按需加载。
+ */
+function prefetchPdfEngine() {
+  // 桩环境（纯 Node 的 DOM 冒烟测试）里没有 navigator，取不到就当没有省流信息
+  const nav = typeof navigator === "undefined" ? {} : navigator;
+  const connection = nav.connection || nav.mozConnection || {};
+  if (connection.saveData || /(^|-)2g$/.test(String(connection.effectiveType || ""))) return;
+  const schedule = typeof window.requestIdleCallback === "function"
+    ? (callback) => window.requestIdleCallback(callback, { timeout: 8000 })
+    : (callback) => window.setTimeout(callback, 4000);
+  schedule(() => {
+    // 预取失败不吭声：真正的加载点（生成时）会把错误说清楚
+    ensureLibrary("pdfLib").catch(() => {});
+  });
+}
+
 /* -------------------------------------------------------------- 模板读取 */
 
 /**
@@ -1105,31 +1247,6 @@ const TEMPLATE_LOADERS = {
     file: "template-special.docx",
   },
 };
-
-/** 注入一个本地 js 并等它执行完（脚本里会把 window[global] 挂上）。 */
-function loadScriptOnce(src, globalName) {
-  return new Promise((resolve, reject) => {
-    if (window[globalName]) {
-      resolve();
-      return;
-    }
-    const existing = document.querySelector(`script[data-template="${globalName}"]`);
-    if (existing) {
-      existing.addEventListener("load", () => resolve());
-      existing.addEventListener("error", () => reject(new Error(src + " 加载失败。")));
-      return;
-    }
-    const script = document.createElement("script");
-    script.src = "./" + src;
-    script.dataset.template = globalName;
-    script.addEventListener("load", () => {
-      if (window[globalName]) resolve();
-      else reject(new Error(`${src} 已加载但没有提供 ${globalName}。`));
-    });
-    script.addEventListener("error", () => reject(new Error(src + " 加载失败，请确认文件存在。")));
-    document.head.appendChild(script);
-  });
-}
 
 async function loadTemplate(templateId) {
   if (templateCache.has(templateId)) return templateCache.get(templateId);
@@ -2176,6 +2293,14 @@ async function generatePdf() {
   );
 
   try {
+    // PDF 引擎同样是按需下载的（约 0.5 MB）。它多半已被空闲预取拿下来了，
+    // 但慢网络下用户可能先点了生成 —— 那就把"在等什么"显示在进度条上。
+    if (!window.PDFLib) setProgress(0, list.length, `正在加载 ${LAZY_LIBRARIES.pdfLib.label}…`);
+    await ensureLibrary("pdfLib").catch((error) => {
+      throw new Error(
+        "PDF 引擎加载失败（" + (error.message || error) + "）。请检查网络后重试。",
+      );
+    });
     const templateBytes = await loadTemplate(state.template);
     const background = await window.CertCore.extractImage(templateBytes);
     if (!background) throw new Error("证书模板里没有找到背景图。");
@@ -2185,6 +2310,9 @@ async function generatePdf() {
       templateId: state.template,
       background: background,
       core: window.CertCore,
+      // 显式把引擎交进去：cert-direct-pdf 也能从 globalThis 拿，但显式传参
+      // 让"是按需加载来的"这件事在调用点就能看见
+      pdfLib: window.PDFLib,
       batch: wantMerged,
       signal: state.pdfAbort.signal,
       onProgress: (info) => {
