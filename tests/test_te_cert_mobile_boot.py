@@ -17,6 +17,8 @@ Two production faults are pinned here, both reported from a phone:
        AI 工作站。这条是确定性的：不靠"够快"，而是证明布局与那些大脚本无关。
     B. 限速 + 移动视口冷启动：首屏不许下载 xlsx / pdf-lib，请求数与体积都有预算。
     C. 不省流时空闲预取会补上 pdf-lib，且手机视口下真的生成得出一份 PDF。
+    D. 用户已经在 AI 工作站里时不许预取（限速下它会占带宽十几秒），
+       但点「生成」仍要按需拿到引擎。
 
 用法: uv run python tests/test_te_cert_mobile_boot.py
 """
@@ -28,7 +30,7 @@ import socket
 import threading
 from pathlib import Path
 
-from playwright.sync_api import sync_playwright
+from playwright.sync_api import expect, sync_playwright
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -261,7 +263,7 @@ def scenario_generate_on_phone(browser, url: str, errors: list[str]) -> None:
 
     page.fill("#quickInput", "张小三 南京鼓楼医院 26年9月23日")
     page.click("#parseBtn")
-    page.wait_for_function("document.querySelector('#statReady').textContent === '1'")
+    expect(page.locator("#statReady")).to_have_text("1", timeout=60_000)
     with page.expect_download(timeout=120_000) as download_info:
         page.click("#pdfBtn")
     target = OUTPUT / "mobile-lazy-pdf.pdf"
@@ -271,6 +273,49 @@ def scenario_generate_on_phone(browser, url: str, errors: list[str]) -> None:
         "手机视口下真的生成了 PDF",
         data.startswith(b"%PDF-") and len(data) > 100_000,
         f"{len(data):,} 字节",
+    )
+    context.close()
+
+
+def scenario_prefetch_yields_to_ai(browser, url: str, errors: list[str]) -> None:
+    """D：用户人在 AI 工作站里时，预取不许抢带宽。
+
+    这条是拿限速实测定的：400 kbps 下预取要从 6.3s 一直占到 17.3s，
+    而这期间正是用户发材料、等 AI 回话的时候 —— 引擎该等他自己点「生成」。
+    """
+    context = mobile_context(browser)
+    page = context.new_page()
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    seen: list[str] = []
+    page.on("request", lambda request: seen.append(request.url.split("/")[-1]))
+    throttle(context, SLOW_4G)
+
+    page.goto(url, wait_until="commit")
+    page.wait_for_selector("#aiBlock > summary", state="visible", timeout=180_000)
+    # 抢在空闲预取之前进 AI 工作站（实测预取要等到 ~6s，这里是 ~1s）
+    page.click("#aiBlock > summary", force=True)
+    page.wait_for_selector("#aiSessionSelect option", state="attached", timeout=180_000)
+    page.wait_for_timeout(8000)  # 给它足够时间去"偷跑"
+    check(
+        "人在 AI 工作站里时不预取 pdf-lib（带宽留给 AI 请求）",
+        "pdf-lib.min.js" not in seen,
+        "实际请求：" + ", ".join(seen),
+    )
+
+    # 但按需加载这条链不能因此断掉：点生成时仍然要能拿到引擎。
+    # 生成前先「返回设置」——AI 工作站布局下设置面板是隐藏的，快速输入框点不到。
+    page.click("#aiCloseBtn")
+    page.wait_for_selector("#quickInput", state="visible", timeout=60_000)
+    page.fill("#quickInput", "张小三 南京鼓楼医院 26年9月23日")
+    page.click("#parseBtn")
+    expect(page.locator("#statReady")).to_have_text("1", timeout=60_000)
+    with page.expect_download(timeout=180_000) as download_info:
+        page.click("#pdfBtn")
+    download_info.value.save_as(OUTPUT / "ai-mode-lazy-pdf.pdf")
+    check(
+        "该按需加载的时候照样加载（生成走的还是同一条 ensureLibrary）",
+        "pdf-lib.min.js" in seen,
+        "实际请求：" + ", ".join(seen),
     )
     context.close()
 
@@ -285,6 +330,7 @@ def run() -> None:
         scenario_layout_without_app(browser, url, errors)
         scenario_first_screen(browser, url, errors)
         scenario_generate_on_phone(browser, url, errors)
+        scenario_prefetch_yields_to_ai(browser, url, errors)
         browser.close()
 
     check("整个过程没有页面异常", not errors, " | ".join(errors))

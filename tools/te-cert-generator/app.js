@@ -1203,7 +1203,16 @@ function ensureLibrary(name) {
  * 但首屏不该为它买单。所以：先让页面立刻可用，闲下来再补下载，
  * 等用户填完名单点生成时它通常已经在了。
  *
- * 尊重省流：saveData 或 2G 网络下不做这次预取，等真正点生成时再按需加载。
+ * 但"趁空闲"不等于"什么时候都下"：慢链路上这 203 KB（gzip）会占着带宽十几秒，
+ * 而 AI 工作站这条路是先发材料、后生成 —— 用户正等着 AI 回话时，别让引擎插队。
+ * 实测（400 kbps / 400ms RTT / 4x CPU）：预取从 6.3s 一路下到 17.3s，
+ * 同一时刻发的请求就是在这条被占满的链路上排队。
+ * 所以两个条件命中就不预取，等用户点「生成」那一刻再按需加载（那是他自己的显式操作，
+ * 进度条会说明在加载什么）：
+ *   - 面板已经开着：他人在 AI 工作站的流程里；
+ *   - 已经有请求在飞（AI 解析或生成中，都置 state.generating）。
+ *
+ * 另外尊重省流：saveData 或 2G 网络下同样不预取。
  */
 function prefetchPdfEngine() {
   // 桩环境（纯 Node 的 DOM 冒烟测试）里没有 navigator，取不到就当没有省流信息
@@ -1214,6 +1223,8 @@ function prefetchPdfEngine() {
     ? (callback) => window.requestIdleCallback(callback, { timeout: 8000 })
     : (callback) => window.setTimeout(callback, 4000);
   schedule(() => {
+    if (state.generating) return;
+    if (els.aiBlock && els.aiBlock.open) return;
     // 预取失败不吭声：真正的加载点（生成时）会把错误说清楚
     ensureLibrary("pdfLib").catch(() => {});
   });
